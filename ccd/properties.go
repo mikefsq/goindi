@@ -48,6 +48,35 @@ func binningProperty(device string) *server.Property {
 	return p
 }
 
+// controlsProperty is CCD_CONTROLS — the ZWO/ASI convention for camera tuning, set
+// from the INDI control panel. Gain is always present; Offset is added only when the
+// camera supports it. Defined on connect (its range comes from the live camera).
+func controlsProperty(device string, gain, gmin, gmax, off, omin, omax int, hasOffset bool) *server.Property {
+	members := []*server.Member{
+		num("Gain", "Gain", "%.0f", float64(gmin), float64(gmax), float64(gain)),
+	}
+	if hasOffset {
+		members = append(members, num("Offset", "Offset", "%.0f", float64(omin), float64(omax), float64(off)))
+	}
+	p := server.NewProperty(device, "CCD_CONTROLS", server.NumberType, server.RW, members...)
+	p.Label, p.Group = "Controls", "Image Settings"
+	p.SetState(server.Ok)
+	return p
+}
+
+// frameProperty is CCD_FRAME — the subframe/ROI window in sensor pixels. PHD2 sets it
+// to guide on a small region; the default and bounds are the full sensor.
+func frameProperty(device string, x, y, w, h, maxW, maxH int) *server.Property {
+	p := server.NewProperty(device, "CCD_FRAME", server.NumberType, server.RW,
+		num("X", "Left", "%.0f", 0, float64(maxW), float64(x)),
+		num("Y", "Top", "%.0f", 0, float64(maxH), float64(y)),
+		num("WIDTH", "Width", "%.0f", 1, float64(maxW), float64(w)),
+		num("HEIGHT", "Height", "%.0f", 1, float64(maxH), float64(h)))
+	p.Label, p.Group = "Frame", "Image Settings"
+	p.SetState(server.Ok)
+	return p
+}
+
 // blobProperty defines the CCD1 BLOB (the frame). Its data is delivered via the
 // server's SendBLOB, not stored on the property.
 func blobProperty(device string) *server.Property {
