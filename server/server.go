@@ -19,14 +19,14 @@ import (
 // Register devices with AddDevice before Serve. *Server implements Publisher, so it
 // is what each device's handlers and poll loop publish through.
 type Server struct {
-	addr string
-	logf func(string, ...any)
+	addrs []string // one or more "host:port" the hub listens on
+	logf  func(string, ...any)
 
 	mu      sync.Mutex
 	devices map[string]Device
 	order   []Device
 	conns   map[*conn]struct{}
-	ln      net.Listener
+	lns     []net.Listener
 }
 
 // conn is one client connection with a serialized writer. blobs records whether the
@@ -73,9 +73,21 @@ type Option func(*Server)
 // WithLogger sets a diagnostics sink (e.g. log.Printf). Nil disables logging.
 func WithLogger(f func(string, ...any)) Option { return func(s *Server) { s.logf = f } }
 
-// New builds a Server that will listen on addr (":7624" by convention).
+// WithListenAddrs replaces the single New(addr) listener with an explicit set of
+// "host:port" addresses (one listener per address, all feeding the one hub). Use it
+// to bind specific interface addresses instead of the wildcard.
+func WithListenAddrs(addrs ...string) Option {
+	return func(s *Server) {
+		if len(addrs) > 0 {
+			s.addrs = append([]string(nil), addrs...)
+		}
+	}
+}
+
+// New builds a Server that will listen on addr (":7624" by convention). Use
+// WithListenAddrs to bind a specific set of addresses instead.
 func New(addr string, opts ...Option) *Server {
-	s := &Server{addr: addr, devices: map[string]Device{}, conns: map[*conn]struct{}{}}
+	s := &Server{addrs: []string{addr}, devices: map[string]Device{}, conns: map[*conn]struct{}{}}
 	for _, o := range opts {
 		o(s)
 	}
@@ -104,14 +116,28 @@ func (s *Server) log(f string, a ...any) {
 // Serve listens, starts each device's background loop, and accepts clients until
 // ctx is cancelled (one goroutine per connection). Returns nil on clean shutdown.
 func (s *Server) Serve(ctx context.Context) error {
-	ln, err := net.Listen("tcp", s.addr)
-	if err != nil {
-		return fmt.Errorf("indi: listen %s: %w", s.addr, err)
+	var lns []net.Listener
+	for _, a := range s.addrs {
+		ln, err := net.Listen("tcp", a)
+		if err != nil {
+			s.log("indi: listen %s failed: %v", a, err)
+			continue
+		}
+		lns = append(lns, ln)
+		s.log("indi: listening on %s", ln.Addr())
+	}
+	if len(lns) == 0 {
+		return fmt.Errorf("indi: could not bind any of %v", s.addrs)
 	}
 	s.mu.Lock()
-	s.ln = ln
+	s.lns = lns
 	s.mu.Unlock()
-	go func() { <-ctx.Done(); _ = ln.Close() }()
+	go func() {
+		<-ctx.Done()
+		for _, ln := range lns {
+			_ = ln.Close()
+		}
+	}()
 
 	for _, d := range s.allDevices() {
 		if st, ok := d.(Starter); ok {
@@ -119,6 +145,22 @@ func (s *Server) Serve(ctx context.Context) error {
 		}
 	}
 
+	// One accept loop per listener; all register into the shared hub. A fatal accept
+	// error (not shutdown) on any listener ends Serve.
+	errc := make(chan error, len(lns))
+	for _, ln := range lns {
+		go func(ln net.Listener) { errc <- s.acceptLoop(ctx, ln) }(ln)
+	}
+	select {
+	case <-ctx.Done():
+		return nil
+	case err := <-errc:
+		return err
+	}
+}
+
+// acceptLoop accepts clients on one listener until it is closed or errors.
+func (s *Server) acceptLoop(ctx context.Context, ln net.Listener) error {
 	for {
 		nc, err := ln.Accept()
 		if err != nil {
@@ -136,14 +178,14 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 }
 
-// Addr is the listening address (valid after Serve has started).
+// Addr is the first listening address (valid after Serve has started).
 func (s *Server) Addr() net.Addr {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.ln == nil {
+	if len(s.lns) == 0 {
 		return nil
 	}
-	return s.ln.Addr()
+	return s.lns[0].Addr()
 }
 
 func (s *Server) removeConn(c *conn) {
