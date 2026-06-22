@@ -21,6 +21,7 @@ import (
 type Server struct {
 	addrs []string // one or more "host:port" the hub listens on
 	logf  func(string, ...any)
+	debug bool // when true, also log per-message request/response traffic
 
 	mu      sync.Mutex
 	devices map[string]Device
@@ -73,6 +74,10 @@ type Option func(*Server)
 // WithLogger sets a diagnostics sink (e.g. log.Printf). Nil disables logging.
 func WithLogger(f func(string, ...any)) Option { return func(s *Server) { s.logf = f } }
 
+// WithDebug enables per-message request/response traffic logging. Off by default;
+// lifecycle logs (listening, client connect/disconnect) always go to the logger.
+func WithDebug(on bool) Option { return func(s *Server) { s.debug = on } }
+
 // WithListenAddrs replaces the single New(addr) listener with an explicit set of
 // "host:port" addresses (one listener per address, all feeding the one hub). Use it
 // to bind specific interface addresses instead of the wildcard.
@@ -110,6 +115,13 @@ func (s *Server) AddDevice(d Device) error {
 func (s *Server) log(f string, a ...any) {
 	if s.logf != nil {
 		s.logf(f, a...)
+	}
+}
+
+// dlog logs per-message request/response traffic, only when debug is enabled.
+func (s *Server) dlog(f string, a ...any) {
+	if s.debug {
+		s.log(f, a...)
 	}
 }
 
@@ -231,13 +243,13 @@ func (s *Server) handle(ctx context.Context, c *conn) {
 		case "getProperties":
 			var v xgetProperties
 			if dec.DecodeElement(&v, &se) == nil {
-				s.log("indi: <- %s getProperties device=%q name=%q", c.id(), v.Device, v.Name)
+				s.dlog("indi: <- %s getProperties device=%q name=%q", c.id(), v.Device, v.Name)
 				s.snapshot(c, v.Device, v.Name)
 			}
 		case "newNumberVector", "newSwitchVector", "newTextVector":
 			var v xnewVector
 			if dec.DecodeElement(&v, &se) == nil {
-				s.log("indi: <- %s %s %s/%s [%s]", c.id(), se.Name.Local, v.Device, v.Name, newMembersStr(v))
+				s.dlog("indi: <- %s %s %s/%s [%s]", c.id(), se.Name.Local, v.Device, v.Name, newMembersStr(v))
 				s.dispatchNew(v)
 			}
 		case "enableBLOB":
@@ -246,7 +258,7 @@ func (s *Server) handle(ctx context.Context, c *conn) {
 				// "Never" (the default) suppresses BLOBs; "Also"/"Only" enable them.
 				on := !strings.EqualFold(strings.TrimSpace(v.Value), "Never")
 				c.blobs.Store(on)
-				s.log("indi: <- %s enableBLOB device=%q name=%q value=%q -> blobs=%v", c.id(), v.Device, v.Name, strings.TrimSpace(v.Value), on)
+				s.dlog("indi: <- %s enableBLOB device=%q name=%q value=%q -> blobs=%v", c.id(), v.Device, v.Name, strings.TrimSpace(v.Value), on)
 			}
 		default:
 			_ = dec.Skip()
@@ -347,7 +359,7 @@ func (s *Server) SendBLOB(device, name, elem, format string, data []byte) {
 		}
 	}
 	s.mu.Unlock()
-	s.log("indi: -> setBLOBVector %s/%s %d bytes to %d/%d client(s)", device, name, len(data), len(conns), total)
+	s.dlog("indi: -> setBLOBVector %s/%s %d bytes to %d/%d client(s)", device, name, len(data), len(conns), total)
 	for _, c := range conns {
 		if err := c.write(msg); err != nil {
 			s.removeConn(c)
