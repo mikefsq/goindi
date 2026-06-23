@@ -117,6 +117,19 @@ func GuideRateProperty(device string, rate float64) *Property {
 	return p
 }
 
+// DualAxisTrackingProperty toggles dual-axis tracking — the mount driving BOTH axes to
+// follow its refraction/pointing model. Only mounts that support it (lx200.DualAxisTracker,
+// e.g. 10Micron :Sdat/:Gdat) get this property: the driver defines it on connect and
+// removes it on disconnect. OneOfMany ENABLE/DISABLE.
+func DualAxisTrackingProperty(device string) *Property {
+	p := NewProperty(device, "DUAL_AXIS_TRACKING", SwitchType, RW,
+		swMember("ENABLE", "Enable", false),
+		swMember("DISABLE", "Disable", true))
+	p.Label, p.Group, p.Rule = "Dual Axis Tracking", "Motion Control", OneOfMany
+	p.SetState(Ok)
+	return p
+}
+
 // TelescopeInfoProperty reports the optical-train parameters in millimetres (the
 // main scope and the guide scope). The mount can't measure these — they come from
 // the driver's optics config — so a client derives image/pixel scale by combining

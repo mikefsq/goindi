@@ -253,6 +253,86 @@ func TestGuideRateFromMount(t *testing.T) {
 	}
 }
 
+// dualAxisMount is a fakeMount that also supports dual-axis tracking (lx200.DualAxisTracker).
+type dualAxisMount struct {
+	*fakeMount
+	mu  sync.Mutex
+	on  bool
+	set []bool // recorded SetDualAxisTracking calls
+}
+
+func (m *dualAxisMount) DualAxisTracking() (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.on, nil
+}
+
+func (m *dualAxisMount) SetDualAxisTracking(on bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.on = on
+	m.set = append(m.set, on)
+	return nil
+}
+
+func (m *dualAxisMount) lastSet() (bool, bool) { // value, ok
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.set) == 0 {
+		return false, false
+	}
+	return m.set[len(m.set)-1], true
+}
+
+// TestDualAxisTracking: the DUAL_AXIS_TRACKING switch appears only for a DualAxisTracker
+// mount (10Micron), seeded from its state, drives :Sdat on set, and is removed on disconnect.
+func TestDualAxisTracking(t *testing.T) {
+	// A mount without the capability never exposes the switch.
+	plain, _ := newDev()
+	plain.HandleNew(&capPub{}, "CONNECTION", []server.NewMember{nm("CONNECT", "On")})
+	for _, p := range plain.Properties() {
+		if p.Name == "DUAL_AXIS_TRACKING" {
+			t.Error("DUAL_AXIS_TRACKING exposed for a mount without the capability")
+		}
+	}
+
+	// A DualAxisTracker mount exposes it on connect, seeded with the mount's state (on).
+	dm := &dualAxisMount{fakeMount: &fakeMount{}, on: true}
+	d := mount.New("TestScope", func() (lx200.Mount, error) { return dm, nil })
+	pub := &capPub{}
+	d.HandleNew(pub, "CONNECTION", []server.NewMember{nm("CONNECT", "On")})
+
+	var da *server.Property
+	for _, p := range d.Properties() {
+		if p.Name == "DUAL_AXIS_TRACKING" {
+			da = p
+		}
+	}
+	if da == nil {
+		t.Fatal("DUAL_AXIS_TRACKING not exposed after connect")
+	}
+	if !da.Switch("ENABLE") || da.Switch("DISABLE") {
+		t.Errorf("initial switch ENABLE=%v DISABLE=%v; want enabled (mount on)", da.Switch("ENABLE"), da.Switch("DISABLE"))
+	}
+
+	// Client disables it -> :Sdat0 issued, switch flips.
+	d.HandleNew(pub, "DUAL_AXIS_TRACKING", []server.NewMember{nm("DISABLE", "On")})
+	if v, ok := dm.lastSet(); !ok || v != false {
+		t.Errorf("SetDualAxisTracking(false) not issued (last=%v ok=%v)", v, ok)
+	}
+	if da.Switch("ENABLE") || !da.Switch("DISABLE") {
+		t.Errorf("after disable: ENABLE=%v DISABLE=%v; want disabled", da.Switch("ENABLE"), da.Switch("DISABLE"))
+	}
+
+	// Disconnect removes the property.
+	d.HandleNew(pub, "CONNECTION", []server.NewMember{nm("DISCONNECT", "On")})
+	for _, p := range d.Properties() {
+		if p.Name == "DUAL_AXIS_TRACKING" {
+			t.Error("DUAL_AXIS_TRACKING still exposed after disconnect")
+		}
+	}
+}
+
 func TestNoOpticsNoTelescopeInfo(t *testing.T) {
 	d := mount.New("TestScope", func() (lx200.Mount, error) { return &fakeMount{}, nil })
 	for _, p := range d.Properties() {

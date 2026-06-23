@@ -53,14 +53,16 @@ type Device struct {
 	guideWE    *server.Property
 	guideRate  *server.Property // GUIDE_RATE (fraction of sidereal) — PHD2 reads this
 	info       *server.Property // TELESCOPE_INFO, present only when optics is set
+	dualAxis   *server.Property // DUAL_AXIS_TRACKING, defined on connect for DualAxisTracker mounts
 
 	optics       Optics
 	lastOptics   [4]float64 // last-published TELESCOPE_INFO values, to publish only on change
 	guideRateVal float64    // reported guide rate (default 0.5x sidereal)
 
-	mu        sync.Mutex
-	connected bool
-	ctx       context.Context // set by Start; bounds the guide-completion timer
+	mu          sync.Mutex
+	connected   bool
+	dualAxisCap bool            // connected mount supports dual-axis tracking (lx200.DualAxisTracker)
+	ctx         context.Context // set by Start; bounds the guide-completion timer
 }
 
 var errReject = errors.New("mount rejected target")
@@ -81,6 +83,7 @@ func New(name string, m MountFunc, opts ...Option) *Device {
 		o(d)
 	}
 	d.guideRate = server.GuideRateProperty(name, d.guideRateVal)
+	d.dualAxis = server.DualAxisTrackingProperty(name) // defined on connect only if supported
 	if d.optics != nil {
 		d.info = server.TelescopeInfoProperty(name)
 		d.refreshOptics() // seed the members from the holder for the initial def
@@ -104,6 +107,12 @@ func (d *Device) Properties() []*server.Property {
 	props := []*server.Property{d.conn, d.driverInfo, d.eq, d.onSet, d.abort, d.pier, d.guideNS, d.guideWE, d.guideRate}
 	if d.info != nil {
 		props = append(props, d.info)
+	}
+	d.mu.Lock()
+	cap := d.dualAxisCap
+	d.mu.Unlock()
+	if cap { // only advertised while a capable mount is connected (so late clients see it)
+		props = append(props, d.dualAxis)
 	}
 	return props
 }
@@ -152,6 +161,8 @@ func (d *Device) HandleNew(pub server.Publisher, name string, members []server.N
 		}
 		d.guideRate.SetState(server.Ok)
 		pub.Update(d.guideRate)
+	case "DUAL_AXIS_TRACKING":
+		d.handleDualAxis(pub, members)
 	}
 }
 
@@ -172,6 +183,84 @@ func (d *Device) refreshGuideRate(pub server.Publisher, m lx200.Mount) {
 	d.guideRate.SetNumber("GUIDE_RATE_NS", rate)
 	d.guideRate.SetState(server.Ok)
 	pub.Update(d.guideRate)
+}
+
+// refreshDualAxis exposes the DUAL_AXIS_TRACKING switch for mounts that support it
+// (lx200.DualAxisTracker — 10Micron drives both axes to follow its refraction/pointing
+// model), seeding it with the mount's current state and defining the property. Mounts
+// without the capability (am5, rst, onstep, sim) never see it. Paired with clearDualAxis
+// on disconnect.
+func (d *Device) refreshDualAxis(pub server.Publisher, m lx200.Mount) {
+	dt, ok := m.(lx200.DualAxisTracker)
+	if !ok {
+		return
+	}
+	on, err := dt.DualAxisTracking()
+	if err != nil {
+		return
+	}
+	d.setDualAxisSwitch(on)
+	d.mu.Lock()
+	d.dualAxisCap = true
+	d.mu.Unlock()
+	pub.Define(d.dualAxis)
+}
+
+// clearDualAxis removes the DUAL_AXIS_TRACKING property on disconnect (if it was defined).
+func (d *Device) clearDualAxis(pub server.Publisher) {
+	d.mu.Lock()
+	had := d.dualAxisCap
+	d.dualAxisCap = false
+	d.mu.Unlock()
+	if had {
+		pub.Delete(d.name, "DUAL_AXIS_TRACKING")
+	}
+}
+
+// setDualAxisSwitch reflects the on/off state in the OneOfMany ENABLE/DISABLE members.
+func (d *Device) setDualAxisSwitch(on bool) {
+	d.dualAxis.SetSwitch("ENABLE", on)
+	d.dualAxis.SetSwitch("DISABLE", !on)
+	d.dualAxis.SetState(server.Ok)
+}
+
+// handleDualAxis applies a DUAL_AXIS_TRACKING set (ENABLE/DISABLE) to the mount. An
+// unsupported mount or a rejected set (disabling is equatorial-only) reports Alert.
+func (d *Device) handleDualAxis(pub server.Publisher, members []server.NewMember) {
+	m, err := d.mount()
+	if err != nil {
+		d.dualAxis.SetState(server.Alert)
+		pub.Update(d.dualAxis)
+		return
+	}
+	dt, ok := m.(lx200.DualAxisTracker)
+	if !ok {
+		d.dualAxis.SetState(server.Alert)
+		pub.Update(d.dualAxis)
+		return
+	}
+	enable, got := false, false
+	for _, mm := range members {
+		switch mm.Name {
+		case "ENABLE":
+			enable, got = mm.On(), true
+		case "DISABLE":
+			if mm.On() {
+				enable, got = false, true
+			}
+		}
+	}
+	if !got {
+		return
+	}
+	if err := dt.SetDualAxisTracking(enable); err != nil {
+		d.dualAxis.SetState(server.Alert)
+		pub.Update(d.dualAxis)
+		pub.Message(d.name, "dual-axis tracking: "+err.Error())
+		return
+	}
+	d.setDualAxisSwitch(enable)
+	pub.Update(d.dualAxis)
 }
 
 func (d *Device) handleConnection(pub server.Publisher, members []server.NewMember) {
@@ -197,9 +286,11 @@ func (d *Device) handleConnection(pub server.Publisher, members []server.NewMemb
 		d.setConnected(true)
 		d.conn.SetSwitch("CONNECT", true)
 		d.refreshGuideRate(pub, m) // report the mount's real guide rate if it has one
+		d.refreshDualAxis(pub, m)  // expose the dual-axis switch if the mount supports it
 	} else {
 		d.setConnected(false)
 		d.conn.SetSwitch("DISCONNECT", true)
+		d.clearDualAxis(pub)
 	}
 	d.conn.SetState(server.Ok)
 	pub.Update(d.conn)
