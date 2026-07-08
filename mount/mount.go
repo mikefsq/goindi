@@ -109,9 +109,9 @@ func (d *Device) Properties() []*server.Property {
 		props = append(props, d.info)
 	}
 	d.mu.Lock()
-	cap := d.dualAxisCap
+	advertise := d.dualAxisCap
 	d.mu.Unlock()
-	if cap { // only advertised while a capable mount is connected (so late clients see it)
+	if advertise { // only advertised while a capable mount is connected (so late clients see it)
 		props = append(props, d.dualAxis)
 	}
 	return props
@@ -195,11 +195,13 @@ func (d *Device) refreshDualAxis(pub server.Publisher, m lx200.Mount) {
 	if !ok {
 		return
 	}
-	on, err := dt.DualAxisTracking()
-	if err != nil {
-		return
+	// The capability is the type assertion, not the state read: a transient error
+	// on the initial query must not hide the control for the whole session. Seed the
+	// switch when we can read it, otherwise define it at its default and let the
+	// client's first set correct it.
+	if on, err := dt.DualAxisTracking(); err == nil {
+		d.setDualAxisSwitch(on)
 	}
-	d.setDualAxisSwitch(on)
 	d.mu.Lock()
 	d.dualAxisCap = true
 	d.mu.Unlock()
@@ -218,63 +220,70 @@ func (d *Device) clearDualAxis(pub server.Publisher) {
 }
 
 // setDualAxisSwitch reflects the on/off state in the OneOfMany ENABLE/DISABLE members.
+// One SetSwitch suffices: OneOfMany turns the sibling member Off automatically.
 func (d *Device) setDualAxisSwitch(on bool) {
-	d.dualAxis.SetSwitch("ENABLE", on)
-	d.dualAxis.SetSwitch("DISABLE", !on)
+	member := "DISABLE"
+	if on {
+		member = "ENABLE"
+	}
+	d.dualAxis.SetSwitch(member, true)
 	d.dualAxis.SetState(server.Ok)
 }
 
 // handleDualAxis applies a DUAL_AXIS_TRACKING set (ENABLE/DISABLE) to the mount. An
 // unsupported mount or a rejected set (disabling is equatorial-only) reports Alert.
 func (d *Device) handleDualAxis(pub server.Publisher, members []server.NewMember) {
-	m, err := d.mount()
-	if err != nil {
+	alert := func(msg string) {
 		d.dualAxis.SetState(server.Alert)
 		pub.Update(d.dualAxis)
+		if msg != "" {
+			pub.Message(d.name, "dual-axis tracking: "+msg)
+		}
+	}
+	m, err := d.mount()
+	if err != nil {
+		alert("")
 		return
 	}
 	dt, ok := m.(lx200.DualAxisTracker)
 	if !ok {
-		d.dualAxis.SetState(server.Alert)
-		pub.Update(d.dualAxis)
+		alert("")
 		return
 	}
-	enable, got := false, false
-	for _, mm := range members {
-		switch mm.Name {
-		case "ENABLE":
-			enable, got = mm.On(), true
-		case "DISABLE":
-			if mm.On() {
-				enable, got = false, true
-			}
-		}
-	}
+	enable, got := selectedOn(members, "ENABLE", "DISABLE")
 	if !got {
 		return
 	}
 	if err := dt.SetDualAxisTracking(enable); err != nil {
-		d.dualAxis.SetState(server.Alert)
-		pub.Update(d.dualAxis)
-		pub.Message(d.name, "dual-axis tracking: "+err.Error())
+		alert(err.Error())
 		return
 	}
 	d.setDualAxisSwitch(enable)
 	pub.Update(d.dualAxis)
 }
 
-func (d *Device) handleConnection(pub server.Publisher, members []server.NewMember) {
-	connect := false
+// selectedOn resolves a two-member OneOfMany switch set to the boolean the client
+// asked for: (true, true) when the positive member is turned On, (false, true) when
+// the negative is, and (_, false) when neither member is On. It reacts only to the
+// member switched On — the same way a radio group is driven — so a lone "Off" on
+// either member is a no-op rather than an asymmetric command.
+func selectedOn(members []server.NewMember, onName, offName string) (on, ok bool) {
 	for _, m := range members {
+		if !m.On() {
+			continue
+		}
 		switch m.Name {
-		case "CONNECT":
-			connect = m.On()
-		case "DISCONNECT":
-			if m.On() {
-				connect = false
-			}
+		case onName:
+			return true, true
+		case offName:
+			return false, true
 		}
 	}
+	return false, false
+}
+
+func (d *Device) handleConnection(pub server.Publisher, members []server.NewMember) {
+	connect, _ := selectedOn(members, "CONNECT", "DISCONNECT")
 	if connect {
 		m, err := d.mount()
 		if err != nil {
