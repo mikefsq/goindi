@@ -20,8 +20,8 @@ func TestDebugGating(t *testing.T) {
 		capture := func(f string, a ...any) { lines = append(lines, strings.TrimSpace(fmt.Sprintf(f, a...))) }
 		s := New(":0", WithLogger(capture), WithDebug(tc.debug))
 
-		s.log("indi: lifecycle event")              // always
-		s.dlog("indi: <- traffic message")          // debug-only
+		s.log("indi: lifecycle event")     // always
+		s.dlog("indi: <- traffic message") // debug-only
 
 		gotLifecycle := containsPrefix(lines, "indi: lifecycle")
 		gotTraffic := containsPrefix(lines, "indi: <- traffic")

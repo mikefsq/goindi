@@ -1,16 +1,7 @@
 # goindi
 
-A lightwight Go **INDI server** to allow clients like PHD2 and Ekos to drive the 
-fleet's hardware directly. It ships two generic devices: a telescope+guider over 
-any `lx200.Mount`, and a camera (CCD) over any frame source.
-
-Module path: `github.com/mikefsq/goindi`
-
-It is the INDI analogue of `goalpaca`: the `server` package is the protocol +
-hub + a `Device` interface a driver implements; the underlying hardware object
-(a `lx200.Mount`, or an `astrocam` camera) stays the single source of truth, and
-this server is just one more native front-end onto it — a sibling of the Alpaca
-wrapper and the LX200 bridge, never a layer over them.
+A lightwight Go **INDI server** to allow clients like PHD2 to communicate with 
+a generic telescope and camera device. 
 
 ## Layout
 
@@ -44,9 +35,8 @@ goindi/
 ## Conformance testing (the ConformU analogue)
 
 We do **not** depend on libindi's `indi_getprop`/`indi_setprop`. Instead `conform`
-is a native validator: a Go INDI **client** (sharing no code with `server`, so it
-checks the wire independently) drives any INDI server and reports protocol and
-standard-contract compliance — the INDI equivalent of ASCOM ConformU.
+is a native validator: a Go INDI **client** (sharing no code with `server`) drives
+any INDI server and reports protocol and standard-contract compliance.
 
 ```
 indiconform -addr localhost:7624                 # validate every device
@@ -66,10 +56,9 @@ deliberately-broken device (must be caught).
 
 INDI multiplexes **devices behind one connection** by the `device="…"` attribute
 on every message, so you do **not** allocate a port per device. Run one hub on the
-conventional `:7624`, register many devices, and each is addressed by its **name**
-(the INDI equivalent of an Alpaca device number). INDI has **no discovery** (unlike
-Alpaca's UDP 32227), so the port is static and clients are pointed at
-`host:7624` + a device name — which is what they default to anyway.
+conventional `:7624`, register many devices, and each is addressed by its **name**. 
+INDI has **no discovery** (unlike Alpaca's UDP 32227), so the port is static and 
+clients are pointed at `host:7624` + a device name.
 
 ```go
 s := server.New(":7624", server.WithLogger(log.Printf))
@@ -83,9 +72,9 @@ localhost:7624 → "Guide camera"**. One port, pick by name, no `indiserver`.
 
 ## The mount device
 
-`mount.New(name, MountFunc)` is **generic** — every fleet mount satisfies
-`lx200.Mount`, so this one adapter serves them all (like the LX200 bridge). It
-exposes the standard telescope+guider property set and maps it onto the mount:
+`mount.New(name, MountFunc)` is **generic** — every goalpaca mount satisfies
+`lx200.Mount`, so this one adapter serves them all. It exposes the standard 
+telescope+guider property set and maps it onto the mount:
 
 | INDI property | Mount action |
 |---|---|
@@ -102,23 +91,11 @@ State integrity matches the bridge: position (`EQUATORIAL_EOD_COORD`) is read
 corrupt the target register. Pulse-guides are single `:Mg…#` commands, already
 serialized by the mount's command mutex.
 
-## astrofleet integration
+## alpacahurd integration
 
-Both the mount and CCD devices are wired into the `astrofleet` binary
+Both the mount and CCD devices are wired into the `alpacahurd` binary
 (`goalpaca_devices`): an `indi` config block hosts one in-process `:7624` hub, and
-each fleet device opts into it (the device `name` becomes the INDI device id).
+each alpaca device opts into it (the device `name` becomes the INDI device id).
 The CCD adapter drives any Alpaca camera as a frame source, so the **same** device
 serves the simulator and the real ZWO guide camera (`astrocam`'s `PureASICamera`)
 with no driver changes — PHD2 lists it as a guide camera over INDI.
-
-## Status
-
-`go build` / `go vet` / `go test -race` green. The Go tests exercise real XML
-round-trips over TCP (getProperties enumeration, new-vector dispatch + echo,
-slew/sync/pulse-guide/abort, an end-to-end pulse guide over the wire), the CCD
-exposure + FITS BLOB delivery, and run the `conform` validator against the mount
-device (passes) and a broken device (caught).
-
-**Not yet validated** against a live PHD2 + mount/guide-camera — that's the
-hardware stage. The `conform` tool is our standing wire-conformance harness in
-place of the libindi CLI.

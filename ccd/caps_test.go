@@ -13,10 +13,10 @@ type capCam struct {
 	x, y, w, h int
 }
 
-func (c *capCam) Gain() (int, int, int)   { return c.gain, 0, 600 }
-func (c *capCam) SetGain(n int) error     { c.gain = n; return nil }
-func (c *capCam) Offset() (int, int, int) { return c.off, 0, 255 }
-func (c *capCam) SetOffset(n int) error   { c.off = n; return nil }
+func (c *capCam) Gain() (int, int, int)          { return c.gain, 0, 600 }
+func (c *capCam) SetGain(n int) error            { c.gain = n; return nil }
+func (c *capCam) Offset() (int, int, int)        { return c.off, 0, 255 }
+func (c *capCam) SetOffset(n int) error          { c.off = n; return nil }
 func (c *capCam) Subframe() (int, int, int, int) { return c.x, c.y, c.w, c.h }
 func (c *capCam) SetSubframe(x, y, w, h int) error {
 	c.x, c.y, c.w, c.h = x, y, w, h
