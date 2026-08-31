@@ -1,16 +1,16 @@
 // Package client is a Go INDI client: it connects to an INDI server, enumerates
-// its devices and properties, tracks updates, and sets properties. It underpins
-// the conform package (the ConformU analogue for INDI) and can also drive any
-// INDI server directly. It shares no code with goindi/server, so it validates the
-// wire protocol independently rather than round-tripping one codec.
+// its devices and properties, tracks updates, and sets properties.
 package client
 
 import (
 	"context"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"net"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -23,13 +23,23 @@ type Member struct {
 	On             bool
 	Format         string
 	Min, Max, Step float64
+	Size           int64 // BLOB members only: the declared uncompressed length
 }
 
 // Property is the client's view of an INDI property vector.
 type Property struct {
 	Device, Name, Label, Group string
 	Type, State, Perm, Rule    string
-	Members                    []Member
+
+	// Message is the message attr of the last set*Vector that carried one, the
+	// device's stated reason when State goes Alert.
+	Message string
+
+	// Rev counts updates applied to this property, 1 at definition and +1 for
+	// every set or redefinition since.
+	Rev uint64
+
+	Members []Member
 }
 
 // Member returns the named member.
@@ -42,15 +52,43 @@ func (p Property) Member(name string) (Member, bool) {
 	return Member{}, false
 }
 
-// Client is a connected INDI client. Property reads return copies, safe to use
-// while the background read loop applies updates.
+// Message is one <message> log line from the server.
+type Message struct {
+	Device    string // sending device; empty for server-level messages
+	Timestamp string // sender's timestamp attr, verbatim
+	Text      string
+}
+
+// String renders the message with its device and timestamp, when present.
+func (m Message) String() string {
+	s := m.Text
+	if m.Device != "" {
+		s = m.Device + ": " + s
+	}
+	if m.Timestamp != "" {
+		s = m.Timestamp + " " + s
+	}
+	return s
+}
+
+// maxMessages caps the message log, dropping the oldest lines first.
+const maxMessages = 1000
+
+// Client is a connected INDI client whose property reads return copies, safe to
+// use while the background read loop applies updates.
 type Client struct {
 	conn net.Conn
+	done chan struct{}
 
 	mu       sync.Mutex
+	updated  chan struct{} // closed and replaced on every store change; Wait-family waiters listen on it
+	blobSink func(BlobInfo) io.Writer
 	store    map[string]map[string]*Property
 	order    []string
-	messages []string
+	messages []Message // a ring once maxMessages is reached
+	msgNext  int
+	logf     func(format string, args ...any)
+	softErrs int64
 	closed   bool
 	err      error
 }
@@ -62,20 +100,86 @@ func Dial(ctx context.Context, addr string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("indi client: dial %s: %w", addr, err)
 	}
-	c := &Client{conn: conn, store: map[string]map[string]*Property{}}
+	c := &Client{
+		conn:    conn,
+		done:    make(chan struct{}),
+		updated: make(chan struct{}),
+		store:   map[string]map[string]*Property{},
+	}
 	go c.readLoop()
 	return c, nil
 }
 
+// Close closes the connection, ending the read loop.
 func (c *Client) Close() error { return c.conn.Close() }
+
+// Done returns a channel closed when the read loop exits; the client does not
+// reconnect, so a caller that must survive server restarts redials.
+func (c *Client) Done() <-chan struct{} { return c.done }
+
+// Err reports the terminal read-loop error, nil while the connection is alive.
+func (c *Client) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.closed {
+		return nil
+	}
+	return c.err
+}
+
+func (c *Client) fail(err error) {
+	c.mu.Lock()
+	c.closed, c.err = true, err
+	c.signalLocked()
+	c.mu.Unlock()
+	close(c.done)
+}
+
+// signalLocked wakes every Wait-family waiter; the caller holds c.mu.
+func (c *Client) signalLocked() {
+	if c.updated != nil {
+		close(c.updated)
+		c.updated = make(chan struct{})
+	}
+}
+
+// writeTimeout bounds each send; a var so tests can shorten it.
+var writeTimeout = 10 * time.Second
 
 func (c *Client) send(v any) error {
 	b, err := xml.Marshal(v)
 	if err != nil {
 		return err
 	}
+	c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 	_, err = c.conn.Write(append(b, '\n'))
+	c.conn.SetWriteDeadline(time.Time{})
 	return err
+}
+
+// Logf installs a destination for the client's soft-error trace; fn runs on the
+// read loop, so it must not block.
+func (c *Client) Logf(fn func(format string, args ...any)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.logf = fn
+}
+
+// SoftErrors reports how many non-fatal protocol errors the client has swallowed.
+func (c *Client) SoftErrors() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.softErrs
+}
+
+func (c *Client) softError(format string, args ...any) {
+	c.mu.Lock()
+	c.softErrs++
+	fn := c.logf
+	c.mu.Unlock()
+	if fn != nil {
+		fn(format, args...)
+	}
 }
 
 // GetProperties asks the server to define properties (device/name empty = all).
@@ -115,9 +219,7 @@ func (c *Client) readLoop() {
 	for {
 		tok, err := dec.Token()
 		if err != nil {
-			c.mu.Lock()
-			c.closed, c.err = true, err
-			c.mu.Unlock()
+			c.fail(err)
 			return
 		}
 		se, ok := tok.(xml.StartElement)
@@ -127,25 +229,40 @@ func (c *Client) readLoop() {
 		switch se.Name.Local {
 		case "defNumberVector", "defSwitchVector", "defTextVector", "defLightVector", "defBLOBVector":
 			var v wDefVector
-			if dec.DecodeElement(&v, &se) == nil {
+			if err := dec.DecodeElement(&v, &se); err == nil {
 				c.applyDef(se.Name.Local, v)
+			} else {
+				c.softError("indi client: dropped malformed %s: %v", se.Name.Local, err)
 			}
-		case "setNumberVector", "setSwitchVector", "setTextVector", "setLightVector", "setBLOBVector":
+		case "setBLOBVector":
+			// A failure here leaves the stream position unknown, so it ends the
+			// connection rather than being swallowed as a soft error.
+			if err := c.readBlobVector(dec, se); err != nil {
+				c.fail(err)
+				return
+			}
+		case "setNumberVector", "setSwitchVector", "setTextVector", "setLightVector":
 			var v wSetVector
-			if dec.DecodeElement(&v, &se) == nil {
+			if err := dec.DecodeElement(&v, &se); err == nil {
 				c.applySet(v)
+			} else {
+				c.softError("indi client: dropped malformed %s: %v", se.Name.Local, err)
 			}
 		case "delProperty":
 			var v wDelProperty
-			if dec.DecodeElement(&v, &se) == nil {
+			if err := dec.DecodeElement(&v, &se); err == nil {
 				c.applyDel(v)
+			} else {
+				c.softError("indi client: dropped malformed delProperty: %v", err)
 			}
 		case "message":
 			var v wMessage
-			if dec.DecodeElement(&v, &se) == nil && v.Message != "" {
-				c.mu.Lock()
-				c.messages = append(c.messages, v.Message)
-				c.mu.Unlock()
+			if err := dec.DecodeElement(&v, &se); err == nil {
+				if v.Message != "" {
+					c.addMessage(Message{Device: v.Device, Timestamp: v.Timestamp, Text: v.Message})
+				}
+			} else {
+				c.softError("indi client: dropped malformed message: %v", err)
 			}
 		default:
 			_ = dec.Skip()
@@ -158,28 +275,53 @@ func (c *Client) applyDef(elem string, v wDefVector) {
 		Device: v.Device, Name: v.Name, Label: v.Label, Group: v.Group,
 		Type: typeOf(elem), State: v.State, Perm: v.Perm, Rule: v.Rule,
 	}
+	// Chardata is trimmed once, at ingestion: servers wrap values in newlines
+	// and indentation.
 	for _, n := range v.Numbers {
+		val := strings.TrimSpace(n.Value)
 		p.Members = append(p.Members, Member{
-			Name: n.Name, Label: n.Label, Value: n.Value, Num: atof(n.Value),
+			Name: n.Name, Label: n.Label, Value: val, Num: atof(val),
 			Format: n.Format, Min: atof(n.Min), Max: atof(n.Max), Step: atof(n.Step),
 		})
 	}
 	for _, s := range v.Switches {
-		p.Members = append(p.Members, Member{Name: s.Name, Label: s.Label, Value: s.Value, On: isOn(s.Value)})
+		val := strings.TrimSpace(s.Value)
+		p.Members = append(p.Members, Member{Name: s.Name, Label: s.Label, Value: val, On: isOn(val)})
 	}
 	for _, t := range v.Texts {
-		p.Members = append(p.Members, Member{Name: t.Name, Label: t.Label, Value: t.Value})
+		p.Members = append(p.Members, Member{Name: t.Name, Label: t.Label, Value: strings.TrimSpace(t.Value)})
 	}
 	for _, l := range v.Lights {
-		p.Members = append(p.Members, Member{Name: l.Name, Label: l.Label, Value: l.Value})
+		p.Members = append(p.Members, Member{Name: l.Name, Label: l.Label, Value: strings.TrimSpace(l.Value)})
+	}
+	for _, b := range v.BLOBs {
+		p.Members = append(p.Members, Member{Name: b.Name, Label: b.Label})
 	}
 	c.mu.Lock()
 	if c.store[v.Device] == nil {
 		c.store[v.Device] = map[string]*Property{}
-		c.order = append(c.order, v.Device)
+		if !slices.Contains(c.order, v.Device) { // redefinition must not duplicate
+			c.order = append(c.order, v.Device)
+		}
 	}
+	if old := c.store[v.Device][v.Name]; old != nil {
+		p.Rev = old.Rev // a redefinition continues the count, keeping it monotonic
+	}
+	p.Rev++
 	c.store[v.Device][v.Name] = p
+	c.signalLocked()
 	c.mu.Unlock()
+}
+
+func (c *Client) addMessage(m Message) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.messages) < maxMessages {
+		c.messages = append(c.messages, m)
+		return
+	}
+	c.messages[c.msgNext] = m
+	c.msgNext = (c.msgNext + 1) % maxMessages
 }
 
 func (c *Client) applySet(v wSetVector) {
@@ -196,7 +338,11 @@ func (c *Client) applySet(v wSetVector) {
 	if v.State != "" {
 		p.State = v.State
 	}
+	if v.Message != "" {
+		p.Message = v.Message
+	}
 	upd := func(name, val string) {
+		val = strings.TrimSpace(val) // the wire pads chardata
 		for i := range p.Members {
 			if p.Members[i].Name == name {
 				p.Members[i].Value = val
@@ -214,6 +360,11 @@ func (c *Client) applySet(v wSetVector) {
 	for _, t := range v.Texts {
 		upd(t.Name, t.Value)
 	}
+	for _, l := range v.Lights {
+		upd(l.Name, l.Value)
+	}
+	p.Rev++
+	c.signalLocked()
 }
 
 func (c *Client) applyDel(v wDelProperty) {
@@ -222,9 +373,13 @@ func (c *Client) applyDel(v wDelProperty) {
 	if dm := c.store[v.Device]; dm != nil {
 		if v.Name == "" {
 			delete(c.store, v.Device)
+			if i := slices.Index(c.order, v.Device); i >= 0 {
+				c.order = slices.Delete(c.order, i, i+1)
+			}
 		} else {
 			delete(dm, v.Name)
 		}
+		c.signalLocked()
 	}
 }
 
@@ -266,20 +421,49 @@ func (c *Client) Properties(device string) []Property {
 	return out
 }
 
-// Messages returns the <message> log lines received so far.
-func (c *Client) Messages() []string {
+// Messages returns the last maxMessages log lines received, oldest first.
+func (c *Client) Messages() []Message {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return append([]string(nil), c.messages...)
+	out := make([]Message, 0, len(c.messages))
+	out = append(out, c.messages[c.msgNext:]...) // msgNext is 0 until the ring fills
+	return append(out, c.messages[:c.msgNext]...)
 }
 
-func (c *Client) isClosed() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.closed
+// WaitRev blocks until the named property is updated past sinceRev and satisfies
+// pred; on timeout or connection death it returns the last-known snapshot and an
+// error.
+func (c *Client) WaitRev(device, name string, sinceRev uint64, pred func(Property) bool, timeout time.Duration) (Property, error) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		c.mu.Lock()
+		ch := c.updated
+		dead, derr := c.closed, c.err
+		var snap Property
+		if dm := c.store[device]; dm != nil {
+			if p := dm[name]; p != nil {
+				snap = clone(p)
+			}
+		}
+		c.mu.Unlock()
+		if snap.Rev > sinceRev && pred(snap) {
+			return snap, nil
+		}
+		if dead {
+			return snap, fmt.Errorf("indi client: connection down waiting for %s.%s: %w", device, name, derr)
+		}
+		select {
+		case <-ch:
+		case <-timer.C:
+			return snap, fmt.Errorf("indi client: timeout waiting for %s.%s", device, name)
+		}
+	}
 }
 
-// Wait polls until the named property satisfies pred or timeout elapses.
+// Wait polls until the named property satisfies pred, returning (last-known
+// state, false) on timeout or connection death; pred may be satisfied by cached
+// pre-command state, so use WaitRev to await an acknowledgement.
 func (c *Client) Wait(device, name string, pred func(Property) bool, timeout time.Duration) (Property, bool) {
 	deadline := time.Now().Add(timeout)
 	for {
@@ -294,7 +478,8 @@ func (c *Client) Wait(device, name string, pred func(Property) bool, timeout tim
 	}
 }
 
-// WaitDevices polls until at least n devices are known or timeout elapses.
+// WaitDevices polls until at least n devices are known, returning early if the
+// connection dies.
 func (c *Client) WaitDevices(n int, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -307,4 +492,50 @@ func (c *Client) WaitDevices(n int, timeout time.Duration) bool {
 		time.Sleep(5 * time.Millisecond)
 	}
 	return len(c.Devices()) >= n
+}
+
+func (c *Client) isClosed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
+}
+
+// SetNumberAndWait sends a newNumberVector and blocks until the device
+// acknowledges it with the first post-command update in state Ok or Alert.
+func (c *Client) SetNumberAndWait(device, name string, vals map[string]float64, timeout time.Duration) (Property, error) {
+	return c.setAndWait(device, name, timeout, func() error { return c.SetNumber(device, name, vals) })
+}
+
+// SetSwitchAndWait is SetSwitch with SetNumberAndWait's acknowledgement wait.
+func (c *Client) SetSwitchAndWait(device, name string, states map[string]bool, timeout time.Duration) (Property, error) {
+	return c.setAndWait(device, name, timeout, func() error { return c.SetSwitch(device, name, states) })
+}
+
+// SetTextAndWait is SetText with SetNumberAndWait's acknowledgement wait.
+func (c *Client) SetTextAndWait(device, name string, vals map[string]string, timeout time.Duration) (Property, error) {
+	return c.setAndWait(device, name, timeout, func() error { return c.SetText(device, name, vals) })
+}
+
+func (c *Client) setAndWait(device, name string, timeout time.Duration, send func() error) (Property, error) {
+	var since uint64
+	if p, ok := c.Property(device, name); ok {
+		// Recorded before the command, so only a later update can satisfy the wait.
+		since = p.Rev
+	}
+	if err := send(); err != nil {
+		return Property{}, err
+	}
+	p, err := c.WaitRev(device, name, since, func(p Property) bool {
+		return p.State == "Ok" || p.State == "Alert"
+	}, timeout)
+	if err != nil {
+		return p, err
+	}
+	if p.State == "Alert" {
+		if p.Message != "" {
+			return p, fmt.Errorf("indi client: %s.%s: Alert: %s", device, name, p.Message)
+		}
+		return p, fmt.Errorf("indi client: %s.%s: Alert", device, name)
+	}
+	return p, nil
 }

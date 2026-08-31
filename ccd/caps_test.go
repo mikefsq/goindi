@@ -23,6 +23,7 @@ func (c *capCam) SetSubframe(x, y, w, h int) error {
 	return nil
 }
 
+// A capable camera gets CCD_CONTROLS and CCD_FRAME on connect, and sets route to it.
 func TestCCDGainAndSubframeCaps(t *testing.T) {
 	cam := &capCam{gain: 100, off: 10, x: 0, y: 0, w: 16, h: 8}
 	d := New("Cam", func() (Camera, error) { return cam, nil })
@@ -40,7 +41,6 @@ func TestCCDGainAndSubframeCaps(t *testing.T) {
 		t.Fatal("CCD_FRAME not defined on connect")
 	}
 
-	// Gain set over INDI routes to the camera and reads back.
 	d.HandleNew(pub, "CCD_CONTROLS", []server.NewMember{nm("Gain", "350"), nm("Offset", "20")})
 	if cam.gain != 350 || cam.off != 20 {
 		t.Errorf("controls not routed: gain=%d off=%d", cam.gain, cam.off)
@@ -49,7 +49,6 @@ func TestCCDGainAndSubframeCaps(t *testing.T) {
 		t.Errorf("CCD_CONTROLS Gain readback = %v, want 350", g)
 	}
 
-	// Subframe set over INDI routes to the camera and reads back.
 	d.HandleNew(pub, "CCD_FRAME", []server.NewMember{
 		nm("X", "2"), nm("Y", "1"), nm("WIDTH", "8"), nm("HEIGHT", "4"),
 	})

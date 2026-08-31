@@ -1,14 +1,10 @@
 // Package mount is a generic INDI telescope+guider device over any lx200.Mount.
-// Because every fleet mount (tenmicron, am5, rst, onstep) satisfies lx200.Mount,
-// this single adapter serves them all — the same way the LX200 bridge does — and
-// it is a sibling front-end onto the same source-of-truth mount, sharing its
-// OpLock so an INDI-driven slew and an Alpaca-driven slew cannot corrupt the
-// device's target register.
 package mount
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -16,16 +12,10 @@ import (
 	"github.com/mikefsq/lx200"
 )
 
-// MountFunc returns the mount that is live right now, or an error if it is not
-// connected. The device calls it per operation, so a reconnect on the owning side
-// is transparent and no stale handle or device state is cached.
+// MountFunc returns the mount that is live right now, or an error if it is not connected.
 type MountFunc func() (lx200.Mount, error)
 
-// Optics supplies the optical-train parameters for TELESCOPE_INFO, in millimetres
-// (aperture, focal length, then the guide scope's aperture and focal length). The
-// mount can't measure these; they come from the driver's optics config. It is read
-// live on each poll, so a runtime change — an Alpaca setoptics Action on the shared
-// holder — is reflected here without restart. Zero values are reported as 0.
+// Optics supplies the optical-train parameters for TELESCOPE_INFO, in millimetres.
 type Optics interface {
 	OpticsMM() (aperture, focalLength, guiderAperture, guiderFocalLength float64)
 }
@@ -33,11 +23,11 @@ type Optics interface {
 // Option configures a Device.
 type Option func(*Device)
 
-// WithOptics makes the device report TELESCOPE_INFO from o (the optical-train
-// parameters). Without it, the device exposes no TELESCOPE_INFO.
+// WithOptics makes the device report TELESCOPE_INFO from o; without it there is no
+// TELESCOPE_INFO.
 func WithOptics(o Optics) Option { return func(d *Device) { d.optics = o } }
 
-// Device is the INDI adapter. Build it with New and register it with a server.Server.
+// Device is the INDI mount adapter; build it with New and register it with a server.Server.
 type Device struct {
 	name  string
 	mount MountFunc
@@ -51,17 +41,17 @@ type Device struct {
 	pier       *server.Property
 	guideNS    *server.Property
 	guideWE    *server.Property
-	guideRate  *server.Property // GUIDE_RATE (fraction of sidereal) — PHD2 reads this
+	guideRate  *server.Property // GUIDE_RATE, fraction of sidereal
 	info       *server.Property // TELESCOPE_INFO, present only when optics is set
 	dualAxis   *server.Property // DUAL_AXIS_TRACKING, defined on connect for DualAxisTracker mounts
 
 	optics       Optics
-	lastOptics   [4]float64 // last-published TELESCOPE_INFO values, to publish only on change
-	guideRateVal float64    // reported guide rate (default 0.5x sidereal)
+	lastOptics   [4]float64 // last published, so TELESCOPE_INFO only goes out on change
+	guideRateVal float64
 
 	mu          sync.Mutex
 	connected   bool
-	dualAxisCap bool            // connected mount supports dual-axis tracking (lx200.DualAxisTracker)
+	dualAxisCap bool
 	ctx         context.Context // set by Start; bounds the guide-completion timer
 }
 
@@ -83,16 +73,15 @@ func New(name string, m MountFunc, opts ...Option) *Device {
 		o(d)
 	}
 	d.guideRate = server.GuideRateProperty(name, d.guideRateVal)
-	d.dualAxis = server.DualAxisTrackingProperty(name) // defined on connect only if supported
+	d.dualAxis = server.DualAxisTrackingProperty(name) // built here, defined only if the mount supports it
 	if d.optics != nil {
 		d.info = server.TelescopeInfoProperty(name)
-		d.refreshOptics() // seed the members from the holder for the initial def
+		d.refreshOptics() // seed the members so the initial def carries real values
 	}
 	return d
 }
 
-// WithGuideRate sets the reported guide rate (fraction of sidereal, e.g. 0.5). PHD2
-// reads it to scale calibration; set it to match the mount's actual guide-speed setting.
+// WithGuideRate sets the reported guide rate as a fraction of sidereal (e.g. 0.5).
 func WithGuideRate(rate float64) Option {
 	return func(d *Device) {
 		if rate > 0 {
@@ -111,14 +100,13 @@ func (d *Device) Properties() []*server.Property {
 	d.mu.Lock()
 	advertise := d.dualAxisCap
 	d.mu.Unlock()
-	if advertise { // only advertised while a capable mount is connected (so late clients see it)
+	if advertise { // include it so a client connecting after refreshDualAxis still sees it
 		props = append(props, d.dualAxis)
 	}
 	return props
 }
 
-// refreshOptics copies the holder's current values into TELESCOPE_INFO and reports
-// whether they changed since the last publish. Caller publishes on change.
+// refreshOptics copies the current optics into TELESCOPE_INFO, reporting whether they changed.
 func (d *Device) refreshOptics() bool {
 	ap, fl, gap, gfl := d.optics.OpticsMM()
 	now := [4]float64{ap, fl, gap, gfl}
@@ -154,10 +142,16 @@ func (d *Device) HandleNew(pub server.Publisher, name string, members []server.N
 	case "TELESCOPE_TIMED_GUIDE_WE":
 		d.handleGuide(pub, d.guideWE, members)
 	case "GUIDE_RATE":
-		// Store the client-set rate. Most lx200 mounts have no settable guide-rate
-		// command through this interface, so it is not pushed to hardware here.
+		// Reported only: LX200 has no command to set the guide rate.
 		for _, m := range members {
-			d.guideRate.SetNumber(m.Name, m.Float())
+			f, ok := m.Float()
+			if !ok {
+				d.guideRate.SetState(server.Alert)
+				pub.Update(d.guideRate)
+				pub.Message(d.name, fmt.Sprintf("guide rate: bad number %q", m.Value))
+				return
+			}
+			d.guideRate.SetNumber(m.Name, f)
 		}
 		d.guideRate.SetState(server.Ok)
 		pub.Update(d.guideRate)
@@ -166,10 +160,8 @@ func (d *Device) HandleNew(pub server.Publisher, name string, members []server.N
 	}
 }
 
-// refreshGuideRate reads the mount's actual guide rate (fraction of sidereal) when it
-// can report one (lx200.GuideRater — tenmicron, am5), overriding the configured
-// default so PHD2 sees the true value. Mounts that can't report it (rst, onstep, the
-// sim) keep the configured default.
+// refreshGuideRate replaces the configured rate with the mount's real one, when it can
+// report it. A mount that can't keeps the configured default.
 func (d *Device) refreshGuideRate(pub server.Publisher, m lx200.Mount) {
 	gr, ok := m.(lx200.GuideRater)
 	if !ok {
@@ -185,20 +177,14 @@ func (d *Device) refreshGuideRate(pub server.Publisher, m lx200.Mount) {
 	pub.Update(d.guideRate)
 }
 
-// refreshDualAxis exposes the DUAL_AXIS_TRACKING switch for mounts that support it
-// (lx200.DualAxisTracker — 10Micron drives both axes to follow its refraction/pointing
-// model), seeding it with the mount's current state and defining the property. Mounts
-// without the capability (am5, rst, onstep, sim) never see it. Paired with clearDualAxis
-// on disconnect.
+// refreshDualAxis defines DUAL_AXIS_TRACKING, seeded from the mount, if the mount supports it.
 func (d *Device) refreshDualAxis(pub server.Publisher, m lx200.Mount) {
 	dt, ok := m.(lx200.DualAxisTracker)
 	if !ok {
 		return
 	}
-	// The capability is the type assertion, not the state read: a transient error
-	// on the initial query must not hide the control for the whole session. Seed the
-	// switch when we can read it, otherwise define it at its default and let the
-	// client's first set correct it.
+	// Capability is the type assertion, not the state read: a transient read error
+	// must not hide the control for the whole session.
 	if on, err := dt.DualAxisTracking(); err == nil {
 		d.setDualAxisSwitch(on)
 	}
@@ -208,7 +194,6 @@ func (d *Device) refreshDualAxis(pub server.Publisher, m lx200.Mount) {
 	pub.Define(d.dualAxis)
 }
 
-// clearDualAxis removes the DUAL_AXIS_TRACKING property on disconnect (if it was defined).
 func (d *Device) clearDualAxis(pub server.Publisher) {
 	d.mu.Lock()
 	had := d.dualAxisCap
@@ -219,7 +204,6 @@ func (d *Device) clearDualAxis(pub server.Publisher) {
 	}
 }
 
-// setDualAxisSwitch reflects the on/off state in the OneOfMany ENABLE/DISABLE members.
 // One SetSwitch suffices: OneOfMany turns the sibling member Off automatically.
 func (d *Device) setDualAxisSwitch(on bool) {
 	member := "DISABLE"
@@ -230,8 +214,8 @@ func (d *Device) setDualAxisSwitch(on bool) {
 	d.dualAxis.SetState(server.Ok)
 }
 
-// handleDualAxis applies a DUAL_AXIS_TRACKING set (ENABLE/DISABLE) to the mount. An
-// unsupported mount or a rejected set (disabling is equatorial-only) reports Alert.
+// A rejected set is expected: mounts refuse to disable dual-axis tracking outside
+// equatorial mode.
 func (d *Device) handleDualAxis(pub server.Publisher, members []server.NewMember) {
 	alert := func(msg string) {
 		d.dualAxis.SetState(server.Alert)
@@ -262,11 +246,7 @@ func (d *Device) handleDualAxis(pub server.Publisher, members []server.NewMember
 	pub.Update(d.dualAxis)
 }
 
-// selectedOn resolves a two-member OneOfMany switch set to the boolean the client
-// asked for: (true, true) when the positive member is turned On, (false, true) when
-// the negative is, and (_, false) when neither member is On. It reacts only to the
-// member switched On — the same way a radio group is driven — so a lone "Off" on
-// either member is a no-op rather than an asymmetric command.
+// Only an On counts, so a lone "Off" is a no-op rather than an asymmetric command.
 func selectedOn(members []server.NewMember, onName, offName string) (on, ok bool) {
 	for _, m := range members {
 		if !m.On() {
@@ -294,8 +274,8 @@ func (d *Device) handleConnection(pub server.Publisher, members []server.NewMemb
 		}
 		d.setConnected(true)
 		d.conn.SetSwitch("CONNECT", true)
-		d.refreshGuideRate(pub, m) // report the mount's real guide rate if it has one
-		d.refreshDualAxis(pub, m)  // expose the dual-axis switch if the mount supports it
+		d.refreshGuideRate(pub, m)
+		d.refreshDualAxis(pub, m)
 	} else {
 		d.setConnected(false)
 		d.conn.SetSwitch("DISCONNECT", true)
@@ -315,11 +295,21 @@ func (d *Device) handleEq(pub server.Publisher, members []server.NewMember) {
 	var ra, dec float64
 	haveRA, haveDec := false, false
 	for _, mm := range members {
-		switch mm.Name {
-		case "RA":
-			ra, haveRA = mm.Float(), true
-		case "DEC":
-			dec, haveDec = mm.Float(), true
+		if mm.Name != "RA" && mm.Name != "DEC" {
+			continue
+		}
+		v, ok := mm.Float()
+		if !ok {
+			// Reject the whole command: a malformed coordinate must not slew, least of all to 0.
+			d.eq.SetState(server.Alert)
+			pub.Update(d.eq)
+			pub.Message(d.name, fmt.Sprintf("goto: bad %s value %q", mm.Name, mm.Value))
+			return
+		}
+		if mm.Name == "RA" {
+			ra, haveRA = v, true
+		} else {
+			dec, haveDec = v, true
 		}
 	}
 	if !haveRA || !haveDec {
@@ -328,8 +318,7 @@ func (d *Device) handleEq(pub server.Publisher, members []server.NewMember) {
 	sync := d.onSet.Switch("SYNC")
 	d.eq.SetState(server.Busy)
 	pub.Update(d.eq)
-	// Run the (possibly slow) goto off the read loop. The OpLock keeps the whole
-	// set-target-then-act sequence atomic against the Alpaca front-end.
+	// Off the read loop: a goto can take seconds.
 	go func() {
 		err := withOp(m, func() error {
 			if ok, e := m.SetTargetRA(ra); e != nil {
@@ -355,7 +344,7 @@ func (d *Device) handleEq(pub server.Publisher, members []server.NewMember) {
 		case sync:
 			d.eq.SetState(server.Ok)
 		default:
-			// A slew is now in progress; the poll loop flips Busy→Ok on completion.
+			// Slew in progress; the poll loop flips Busy→Ok on completion.
 		}
 		pub.Update(d.eq)
 	}()
@@ -374,10 +363,8 @@ func (d *Device) handleAbort(pub server.Publisher, members []server.NewMember) {
 	pub.Update(d.abort)
 }
 
-// handleGuide is the latency-critical path PHD2's control loop is tuned around, so
-// it stays as close to driver-to-driver as the protocol allows: parse the
-// new-vector, issue the pulse straight to the mount (lx200 :Mg#) with no buffering
-// or transformation. The mount then guides autonomously for the pulse duration.
+// handleGuide issues the pulse straight to the mount, which then guides autonomously
+// for the duration.
 func (d *Device) handleGuide(pub server.Publisher, prop *server.Property, members []server.NewMember) {
 	m, err := d.mount()
 	if err != nil {
@@ -394,7 +381,15 @@ func (d *Device) handleGuide(pub server.Publisher, prop *server.Property, member
 	}
 	maxMs := 0
 	for _, mm := range members {
-		ms := int(mm.Float())
+		f, ok := mm.Float()
+		if !ok {
+			// A malformed duration must not pulse at all.
+			prop.SetState(server.Alert)
+			pub.Update(prop)
+			pub.Message(d.name, fmt.Sprintf("pulse guide: bad duration %q", mm.Value))
+			return
+		}
+		ms := int(f)
 		if ms <= 0 {
 			continue
 		}
@@ -402,7 +397,7 @@ func (d *Device) handleGuide(pub server.Publisher, prop *server.Property, member
 		if !ok {
 			continue
 		}
-		if err := g.PulseGuide(dir, ms); err != nil { // immediate; :Mg# returns at once
+		if err := g.PulseGuide(dir, ms); err != nil { // :Mg# returns at once, it does not block for ms
 			pub.Message(d.name, "pulse guide: "+err.Error())
 			continue
 		}
@@ -416,12 +411,8 @@ func (d *Device) handleGuide(pub server.Publisher, prop *server.Property, member
 		pub.Update(prop)
 		return
 	}
-	// Hold the property Busy for exactly the pulse duration, then report completion.
-	// The mount is already moving (the :Mg# above fired immediately); this only makes
-	// the completion signal honest so a client that waits on the property — the INDI
-	// contract — sees the true pulse time instead of an instant "done" that would let
-	// it measure mid-correction and destabilize the loop. It adds no latency (the
-	// client waits the duration regardless) and does not block the read loop.
+	// Hold Busy for the duration: reporting "done" while the mount is still moving would
+	// let a waiting client measure mid-correction.
 	prop.SetState(server.Busy)
 	pub.Update(prop)
 	go func(ms int) {
@@ -440,8 +431,7 @@ func (d *Device) handleGuide(pub server.Publisher, prop *server.Property, member
 	}(maxMs)
 }
 
-// guideCtx is the context bounding the guide-completion timer (Background until
-// Start has run, so a pulse issued in the startup window still completes).
+// Background until Start has run, so a pulse issued in the startup window still completes.
 func (d *Device) guideCtx() context.Context {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -465,8 +455,7 @@ func guideDir(member string) (lx200.Direction, bool) {
 	return 0, false
 }
 
-// Start polls the mount once connected and publishes live position + pier side, so
-// clients (PHD2's Dec compensation, the chart reticle) track the real mount.
+// Start polls the connected mount and publishes its live position and pier side.
 func (d *Device) Start(ctx context.Context, pub server.Publisher) {
 	d.mu.Lock()
 	d.ctx = ctx
@@ -478,8 +467,7 @@ func (d *Device) Start(ctx context.Context, pub server.Publisher) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			// Optics is config, available whether or not the mount is connected;
-			// republish TELESCOPE_INFO only when it changes (e.g. a setoptics Action).
+			// Optics is config, so it is published whether or not the mount is connected.
 			if d.optics != nil && d.refreshOptics() {
 				pub.Update(d.info)
 			}
@@ -519,9 +507,8 @@ func (d *Device) Start(ctx context.Context, pub server.Publisher) {
 func (d *Device) setConnected(b bool) { d.mu.Lock(); d.connected = b; d.mu.Unlock() }
 func (d *Device) isConnected() bool   { d.mu.Lock(); defer d.mu.Unlock(); return d.connected }
 
-// withOp runs f under the mount's OpLock if it provides one, serializing the
-// set-target-then-act sequence against other front-ends (the Alpaca wrapper, the
-// LX200 bridge) sharing this mount.
+// withOp runs f under the mount's OpLock, keeping set-target-then-act atomic against
+// other front-ends sharing this mount.
 func withOp(m lx200.Mount, f func() error) error {
 	if l, ok := m.(lx200.OpLocker); ok {
 		defer l.OpLock()()

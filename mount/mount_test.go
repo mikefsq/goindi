@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -13,8 +14,7 @@ import (
 	"github.com/mikefsq/lx200"
 )
 
-// fakeMount is a lx200.Mount (+ Guider, OpLocker, PierSider) recording what the
-// INDI device drives it to do.
+// fakeMount is an lx200.Mount recording what the INDI device drives it to do.
 type fakeMount struct {
 	mu     sync.Mutex
 	opMu   sync.Mutex
@@ -73,7 +73,7 @@ func (f *fakeMount) PulseGuide(d lx200.Direction, ms int) error {
 func (f *fakeMount) PierSide() (lx200.PierSide, error) { return f.side, nil }
 func (f *fakeMount) OpLock() func()                    { f.opMu.Lock(); return f.opMu.Unlock }
 
-// mountState is a mutex-free snapshot of the recorded state.
+// mountState is a lock-free snapshot of the recorded state.
 type mountState struct {
 	tRA, tDec      float64
 	slewed, synced bool
@@ -110,6 +110,11 @@ func (c *capPub) Message(_, m string)                  { c.mu.Lock(); c.msgs = a
 func (c *capPub) Delete(_, _ string)                   {}
 func (c *capPub) SendBLOB(_, _, _, _ string, _ []byte) {}
 func (c *capPub) note(n string)                        { c.mu.Lock(); c.updated = append(c.updated, n); c.mu.Unlock() }
+func (c *capPub) messages() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.msgs...)
+}
 
 func nm(name, val string) server.NewMember { return server.NewMember{Name: name, Value: val} }
 
@@ -118,11 +123,11 @@ func newDev() (*mount.Device, *fakeMount) {
 	return mount.New("TestScope", func() (lx200.Mount, error) { return f, nil }), f
 }
 
+// CONNECT settles the CONNECTION property Ok.
 func TestConnect(t *testing.T) {
 	d, _ := newDev()
 	pub := &capPub{}
 	d.HandleNew(pub, "CONNECTION", []server.NewMember{nm("CONNECT", "On")})
-	// The connection property should have been published as Ok with CONNECT on.
 	for _, p := range d.Properties() {
 		if p.Name == "CONNECTION" {
 			if p.State() != server.Ok || !p.Switch("CONNECT") {
@@ -132,6 +137,7 @@ func TestConnect(t *testing.T) {
 	}
 }
 
+// With ON_COORD_SET=SLEW, a new coordinate slews rather than syncs.
 func TestSlew(t *testing.T) {
 	d, f := newDev()
 	pub := &capPub{}
@@ -145,6 +151,7 @@ func TestSlew(t *testing.T) {
 	}
 }
 
+// With ON_COORD_SET=SYNC, a new coordinate syncs rather than slews.
 func TestSync(t *testing.T) {
 	d, f := newDev()
 	pub := &capPub{}
@@ -157,6 +164,7 @@ func TestSync(t *testing.T) {
 	}
 }
 
+// A timed-guide vector reaches the mount as one pulse of the right direction and length.
 func TestPulseGuide(t *testing.T) {
 	d, f := newDev()
 	pub := &capPub{}
@@ -167,7 +175,62 @@ func TestPulseGuide(t *testing.T) {
 	}
 }
 
-// fakeOptics is a mutable Optics holder (millimetres).
+// A goto with a malformed number must alert the property and touch nothing on the mount.
+func TestMalformedCoordinateRejected(t *testing.T) {
+	d, f := newDev()
+	pub := &capPub{}
+	d.HandleNew(pub, "ON_COORD_SET", []server.NewMember{nm("SLEW", "On")})
+	d.HandleNew(pub, "EQUATORIAL_EOD_COORD", []server.NewMember{nm("RA", "1O:23:45"), nm("DEC", "10")})
+	time.Sleep(30 * time.Millisecond) // a slew, had one started, runs async
+	s := f.snap()
+	if s.slewed || s.synced || s.tRA != 0 || s.tDec != 0 {
+		t.Errorf("malformed RA moved the mount: %+v", s)
+	}
+	for _, p := range d.Properties() {
+		if p.Name == "EQUATORIAL_EOD_COORD" && p.State() != server.Alert {
+			t.Errorf("EQUATORIAL_EOD_COORD state = %v, want Alert", p.State())
+		}
+	}
+	found := false
+	for _, m := range pub.messages() {
+		if strings.Contains(m, "bad RA") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no rejection message published; got %v", pub.messages())
+	}
+}
+
+// Coordinates in the INDI sexagesimal forms "H:M:S" and "D M S" are accepted.
+func TestSexagesimalCoordinates(t *testing.T) {
+	d, f := newDev()
+	pub := &capPub{}
+	d.HandleNew(pub, "ON_COORD_SET", []server.NewMember{nm("SLEW", "On")})
+	d.HandleNew(pub, "EQUATORIAL_EOD_COORD", []server.NewMember{nm("RA", "12:30:00"), nm("DEC", "-5 30 00")})
+	waitFor(t, func() bool { return f.snap().slewed }, "sexagesimal slew")
+	s := f.snap()
+	if !approx(s.tRA, 12.5) || !approx(s.tDec, -5.5) {
+		t.Errorf("sexagesimal targets: tRA=%v tDec=%v want 12.5/-5.5", s.tRA, s.tDec)
+	}
+}
+
+// A malformed duration must not pulse.
+func TestMalformedGuidePulseRejected(t *testing.T) {
+	d, f := newDev()
+	pub := &capPub{}
+	d.HandleNew(pub, "TELESCOPE_TIMED_GUIDE_NS", []server.NewMember{nm("TIMED_GUIDE_N", "12ms")})
+	if got := f.snap().pulses; len(got) != 0 {
+		t.Errorf("malformed duration pulsed the mount: %+v", got)
+	}
+	for _, p := range d.Properties() {
+		if p.Name == "TELESCOPE_TIMED_GUIDE_NS" && p.State() != server.Alert {
+			t.Errorf("TELESCOPE_TIMED_GUIDE_NS state = %v, want Alert", p.State())
+		}
+	}
+}
+
+// fakeOptics is a mutable Optics holder, in millimetres.
 type fakeOptics struct {
 	mu               sync.Mutex
 	ap, fl, gap, gfl float64
@@ -179,6 +242,7 @@ func (o *fakeOptics) OpticsMM() (float64, float64, float64, float64) {
 	return o.ap, o.fl, o.gap, o.gfl
 }
 
+// WithOptics exposes TELESCOPE_INFO carrying the holder's values.
 func TestTelescopeInfoReportsOptics(t *testing.T) {
 	opt := &fakeOptics{ap: 200, fl: 1600, gap: 60, gfl: 240}
 	d := mount.New("TestScope", func() (lx200.Mount, error) { return &fakeMount{}, nil }, mount.WithOptics(opt))
@@ -203,6 +267,7 @@ func TestTelescopeInfoReportsOptics(t *testing.T) {
 	}
 }
 
+// WithGuideRate is reported on both GUIDE_RATE axes.
 func TestGuideRateReported(t *testing.T) {
 	d := mount.New("TestScope", func() (lx200.Mount, error) { return &fakeMount{}, nil },
 		mount.WithGuideRate(0.75))
@@ -223,6 +288,7 @@ func TestGuideRateReported(t *testing.T) {
 	}
 }
 
+// Without WithGuideRate the reported rate defaults to 0.5x sidereal.
 func TestGuideRateDefault(t *testing.T) {
 	d := mount.New("TestScope", func() (lx200.Mount, error) { return &fakeMount{}, nil })
 	for _, p := range d.Properties() {
@@ -232,7 +298,7 @@ func TestGuideRateDefault(t *testing.T) {
 	}
 }
 
-// guidingMount is a fakeMount that also reports a real guide rate (lx200.GuideRater).
+// guidingMount is a fakeMount that also reports its real guide rate.
 type guidingMount struct {
 	*fakeMount
 	rate float64
@@ -240,8 +306,7 @@ type guidingMount struct {
 
 func (g *guidingMount) GuideRateSidereal() (float64, error) { return g.rate, nil }
 
-// TestGuideRateFromMount: a mount that can report its rate overrides the default on
-// connect (tenmicron/am5 behaviour).
+// A mount that can report its rate overrides the configured default on connect.
 func TestGuideRateFromMount(t *testing.T) {
 	gm := &guidingMount{fakeMount: &fakeMount{}, rate: 0.25}
 	d := mount.New("TestScope", func() (lx200.Mount, error) { return gm, nil })
@@ -253,12 +318,12 @@ func TestGuideRateFromMount(t *testing.T) {
 	}
 }
 
-// dualAxisMount is a fakeMount that also supports dual-axis tracking (lx200.DualAxisTracker).
+// dualAxisMount is a fakeMount that also supports dual-axis tracking.
 type dualAxisMount struct {
 	*fakeMount
 	mu  sync.Mutex
 	on  bool
-	set []bool // recorded SetDualAxisTracking calls
+	set []bool
 }
 
 func (m *dualAxisMount) DualAxisTracking() (bool, error) {
@@ -284,10 +349,9 @@ func (m *dualAxisMount) lastSet() (bool, bool) { // value, ok
 	return m.set[len(m.set)-1], true
 }
 
-// TestDualAxisTracking: the DUAL_AXIS_TRACKING switch appears only for a DualAxisTracker
-// mount (10Micron), seeded from its state, drives :Sdat on set, and is removed on disconnect.
+// DUAL_AXIS_TRACKING appears only for a capable mount, seeded from its state, drives the
+// mount on set, and is removed on disconnect.
 func TestDualAxisTracking(t *testing.T) {
-	// A mount without the capability never exposes the switch.
 	plain, _ := newDev()
 	plain.HandleNew(&capPub{}, "CONNECTION", []server.NewMember{nm("CONNECT", "On")})
 	for _, p := range plain.Properties() {
@@ -296,7 +360,6 @@ func TestDualAxisTracking(t *testing.T) {
 		}
 	}
 
-	// A DualAxisTracker mount exposes it on connect, seeded with the mount's state (on).
 	dm := &dualAxisMount{fakeMount: &fakeMount{}, on: true}
 	d := mount.New("TestScope", func() (lx200.Mount, error) { return dm, nil })
 	pub := &capPub{}
@@ -315,7 +378,6 @@ func TestDualAxisTracking(t *testing.T) {
 		t.Errorf("initial switch ENABLE=%v DISABLE=%v; want enabled (mount on)", da.Switch("ENABLE"), da.Switch("DISABLE"))
 	}
 
-	// Client disables it -> :Sdat0 issued, switch flips.
 	d.HandleNew(pub, "DUAL_AXIS_TRACKING", []server.NewMember{nm("DISABLE", "On")})
 	if v, ok := dm.lastSet(); !ok || v != false {
 		t.Errorf("SetDualAxisTracking(false) not issued (last=%v ok=%v)", v, ok)
@@ -324,7 +386,6 @@ func TestDualAxisTracking(t *testing.T) {
 		t.Errorf("after disable: ENABLE=%v DISABLE=%v; want disabled", da.Switch("ENABLE"), da.Switch("DISABLE"))
 	}
 
-	// Disconnect removes the property.
 	d.HandleNew(pub, "CONNECTION", []server.NewMember{nm("DISCONNECT", "On")})
 	for _, p := range d.Properties() {
 		if p.Name == "DUAL_AXIS_TRACKING" {
@@ -333,6 +394,7 @@ func TestDualAxisTracking(t *testing.T) {
 	}
 }
 
+// Without WithOptics there is no TELESCOPE_INFO.
 func TestNoOpticsNoTelescopeInfo(t *testing.T) {
 	d := mount.New("TestScope", func() (lx200.Mount, error) { return &fakeMount{}, nil })
 	for _, p := range d.Properties() {
@@ -342,6 +404,7 @@ func TestNoOpticsNoTelescopeInfo(t *testing.T) {
 	}
 }
 
+// TELESCOPE_ABORT_MOTION halts the mount.
 func TestAbort(t *testing.T) {
 	d, f := newDev()
 	pub := &capPub{}
@@ -371,7 +434,7 @@ func TestEndToEndPulseGuide(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	t.Cleanup(func() { c.Close() })
-	go drain(c) // consume the def/set stream the server pushes
+	go drain(c) // the server blocks writing its def/set stream if nobody reads
 
 	fmt.Fprint(c, `<newSwitchVector device="TestScope" name="CONNECTION"><oneSwitch name="CONNECT">On</oneSwitch></newSwitchVector>`)
 	fmt.Fprint(c, `<newNumberVector device="TestScope" name="TELESCOPE_TIMED_GUIDE_NS"><oneNumber name="TIMED_GUIDE_N">512</oneNumber></newNumberVector>`)

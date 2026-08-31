@@ -2,16 +2,26 @@ package server
 
 import "strconv"
 
-// INDI DRIVER_INTERFACE bitmask values (subset). A device advertises the sum of
-// the interfaces it implements in DRIVER_INFO so clients categorize it — PHD2's
-// mount dropdown shows TELESCOPE devices, its camera dropdown CCD devices.
+// INDI DRIVER_INTERFACE bitmask values; a device advertises the sum of the
+// interfaces it implements in DRIVER_INFO.
 const (
-	InterfaceGeneral   = 0
-	InterfaceTelescope = 1 << 0 // 1
-	InterfaceCCD       = 1 << 1 // 2
-	InterfaceGuider    = 1 << 2 // 4
-	InterfaceFocuser   = 1 << 3 // 8
-	InterfaceFilter    = 1 << 4 // 16
+	InterfaceGeneral      = 0
+	InterfaceTelescope    = 1 << 0
+	InterfaceCCD          = 1 << 1
+	InterfaceGuider       = 1 << 2
+	InterfaceFocuser      = 1 << 3
+	InterfaceFilter       = 1 << 4
+	InterfaceDome         = 1 << 5
+	InterfaceGPS          = 1 << 6
+	InterfaceWeather      = 1 << 7
+	InterfaceAO           = 1 << 8
+	InterfaceDustcap      = 1 << 9
+	InterfaceLightbox     = 1 << 10
+	InterfaceDetector     = 1 << 11
+	InterfaceRotator      = 1 << 12
+	InterfaceSpectrograph = 1 << 13
+	InterfaceCorrelator   = 1 << 14
+	InterfaceAux          = 1 << 15
 )
 
 func numMember(name, label, format string, min, max, step, val float64) *Member {
@@ -20,9 +30,8 @@ func numMember(name, label, format string, min, max, step, val float64) *Member 
 func swMember(name, label string, on bool) *Member { return &Member{Name: name, Label: label, On: on} }
 func txtMember(name, label, val string) *Member    { return &Member{Name: name, Label: label, Text: val} }
 
-// --- Standard telescope properties (the set PHD2 / Ekos drive) ---
-
-// ConnectionProperty is the universal CONNECT/DISCONNECT switch (defaults disconnected).
+// ConnectionProperty is the universal CONNECT/DISCONNECT switch, defaulting to
+// disconnected.
 func ConnectionProperty(device string) *Property {
 	p := NewProperty(device, "CONNECTION", SwitchType, RW,
 		swMember("CONNECT", "Connect", false),
@@ -44,8 +53,8 @@ func DriverInfoProperty(device, name, exec, version string, iface int) *Property
 	return p
 }
 
-// EquatorialCoordProperty is the live RA (hours) / DEC (degrees) vector; writing it
-// slews or syncs per ON_COORD_SET.
+// EquatorialCoordProperty is the live RA (hours) / DEC (degrees) vector, whose
+// writes slew or sync per ON_COORD_SET.
 func EquatorialCoordProperty(device string) *Property {
 	p := NewProperty(device, "EQUATORIAL_EOD_COORD", NumberType, RW,
 		numMember("RA", "RA (hours)", "%10.6m", 0, 24, 0, 0),
@@ -55,7 +64,8 @@ func EquatorialCoordProperty(device string) *Property {
 	return p
 }
 
-// OnCoordSetProperty selects what writing EQUATORIAL_EOD_COORD does (defaults TRACK).
+// OnCoordSetProperty selects what a write to EQUATORIAL_EOD_COORD does,
+// defaulting to TRACK.
 func OnCoordSetProperty(device string) *Property {
 	p := NewProperty(device, "ON_COORD_SET", SwitchType, RW,
 		swMember("SLEW", "Slew", false),
@@ -66,7 +76,7 @@ func OnCoordSetProperty(device string) *Property {
 	return p
 }
 
-// AbortProperty stops all motion when ABORT is set On (momentary).
+// AbortProperty stops all motion when ABORT is set On.
 func AbortProperty(device string) *Property {
 	p := NewProperty(device, "TELESCOPE_ABORT_MOTION", SwitchType, RW,
 		swMember("ABORT", "Abort", false))
@@ -75,7 +85,7 @@ func AbortProperty(device string) *Property {
 	return p
 }
 
-// PierSideProperty reports the German-equatorial pier side (read-only).
+// PierSideProperty reports the German-equatorial pier side.
 func PierSideProperty(device string) *Property {
 	p := NewProperty(device, "TELESCOPE_PIER_SIDE", SwitchType, RO,
 		swMember("PIER_WEST", "West (pointing east)", false),
@@ -85,8 +95,7 @@ func PierSideProperty(device string) *Property {
 	return p
 }
 
-// TimedGuideNSProperty / TimedGuideWEProperty are the pulse-guide vectors (milliseconds)
-// — the properties PHD2 writes to guide.
+// TimedGuideNSProperty is the north/south pulse-guide vector, in milliseconds.
 func TimedGuideNSProperty(device string) *Property {
 	p := NewProperty(device, "TELESCOPE_TIMED_GUIDE_NS", NumberType, RW,
 		numMember("TIMED_GUIDE_N", "North (ms)", "%.0f", 0, 60000, 1, 0),
@@ -96,6 +105,7 @@ func TimedGuideNSProperty(device string) *Property {
 	return p
 }
 
+// TimedGuideWEProperty is the west/east pulse-guide vector, in milliseconds.
 func TimedGuideWEProperty(device string) *Property {
 	p := NewProperty(device, "TELESCOPE_TIMED_GUIDE_WE", NumberType, RW,
 		numMember("TIMED_GUIDE_W", "West (ms)", "%.0f", 0, 60000, 1, 0),
@@ -105,9 +115,7 @@ func TimedGuideWEProperty(device string) *Property {
 	return p
 }
 
-// GuideRateProperty reports the mount's guide rate as a fraction of sidereal (0.5 =
-// half), which PHD2 reads (the GUIDE_RATE property, members GUIDE_RATE_WE/NS) to
-// scale its calibration; without it PHD2 warns and falls back to 0.5x.
+// GuideRateProperty reports the mount's guide rate as a fraction of sidereal.
 func GuideRateProperty(device string, rate float64) *Property {
 	p := NewProperty(device, "GUIDE_RATE", NumberType, RW,
 		numMember("GUIDE_RATE_WE", "RA (x sidereal)", "%.2f", 0, 1, 0.05, rate),
@@ -117,10 +125,8 @@ func GuideRateProperty(device string, rate float64) *Property {
 	return p
 }
 
-// DualAxisTrackingProperty toggles dual-axis tracking — the mount driving BOTH axes to
-// follow its refraction/pointing model. Only mounts that support it (lx200.DualAxisTracker,
-// e.g. 10Micron :Sdat/:Gdat) get this property: the driver defines it on connect and
-// removes it on disconnect. OneOfMany ENABLE/DISABLE.
+// DualAxisTrackingProperty toggles tracking on both axes, following the mount's
+// refraction and pointing model.
 func DualAxisTrackingProperty(device string) *Property {
 	p := NewProperty(device, "DUAL_AXIS_TRACKING", SwitchType, RW,
 		swMember("ENABLE", "Enable", false),
@@ -130,11 +136,8 @@ func DualAxisTrackingProperty(device string) *Property {
 	return p
 }
 
-// TelescopeInfoProperty reports the optical-train parameters in millimetres (the
-// main scope and the guide scope). The mount can't measure these — they come from
-// the driver's optics config — so a client derives image/pixel scale by combining
-// the focal length here with the camera's CCD_INFO pixel size. Read-only: optics is
-// set on our side through Alpaca, then reported identically here.
+// TelescopeInfoProperty reports the main and guide scope optical parameters in
+// millimetres.
 func TelescopeInfoProperty(device string) *Property {
 	p := NewProperty(device, "TELESCOPE_INFO", NumberType, RO,
 		numMember("TELESCOPE_APERTURE", "Aperture (mm)", "%.2f", 0, 1e6, 0, 0),

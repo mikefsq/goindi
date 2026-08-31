@@ -8,13 +8,6 @@ import (
 	"strings"
 )
 
-// INDI is a stream of top-level XML elements over a socket — no enclosing root
-// document and no length framing. This file defines the element structs and the
-// marshal helpers; the streaming read loop lives in server.go (an xml.Decoder
-// Token loop, since the stream is not a single document).
-
-// ---- shared one-member elements (in both directions) ----
-
 type xoneNumber struct {
 	Name  string `xml:"name,attr"`
 	Value string `xml:",chardata"`
@@ -27,8 +20,10 @@ type xoneText struct {
 	Name  string `xml:"name,attr"`
 	Value string `xml:",chardata"`
 }
-
-// ---- outbound: def*Vector (full property definition) ----
+type xoneLight struct {
+	Name  string `xml:"name,attr"`
+	Value string `xml:",chardata"`
+}
 
 type xdefNumber struct {
 	Name   string `xml:"name,attr"`
@@ -53,6 +48,11 @@ type xdefBLOB struct {
 	Name  string `xml:"name,attr"`
 	Label string `xml:"label,attr,omitempty"`
 }
+type xdefLight struct {
+	Name  string `xml:"name,attr"`
+	Label string `xml:"label,attr,omitempty"`
+	Value string `xml:",chardata"`
+}
 
 type xdefVector struct {
 	XMLName   xml.Name
@@ -69,9 +69,8 @@ type xdefVector struct {
 	Switches  []xdefSwitch `xml:"defSwitch,omitempty"`
 	Texts     []xdefText   `xml:"defText,omitempty"`
 	BLOBs     []xdefBLOB   `xml:"defBLOB,omitempty"`
+	Lights    []xdefLight  `xml:"defLight,omitempty"`
 }
-
-// ---- outbound: set*Vector (value/state update) ----
 
 type xsetVector struct {
 	XMLName   xml.Name
@@ -83,6 +82,7 @@ type xsetVector struct {
 	Numbers   []xoneNumber `xml:"oneNumber,omitempty"`
 	Switches  []xoneSwitch `xml:"oneSwitch,omitempty"`
 	Texts     []xoneText   `xml:"oneText,omitempty"`
+	Lights    []xoneLight  `xml:"oneLight,omitempty"`
 }
 
 type xmessage struct {
@@ -99,15 +99,13 @@ type xdelProperty struct {
 	Timestamp string   `xml:"timestamp,attr,omitempty"`
 }
 
-// ---- inbound: client → server ----
-
 type xgetProperties struct {
 	Device string `xml:"device,attr"`
 	Name   string `xml:"name,attr"`
 }
 
-// xnewVector covers newNumberVector / newSwitchVector / newTextVector; only the
-// child list matching the element is populated by the decoder.
+// xnewVector covers newNumberVector, newSwitchVector and newTextVector; only the
+// child list matching the element is populated.
 type xnewVector struct {
 	Device   string       `xml:"device,attr"`
 	Name     string       `xml:"name,attr"`
@@ -121,8 +119,6 @@ type xenableBLOB struct {
 	Name   string `xml:"name,attr"`
 	Value  string `xml:",chardata"`
 }
-
-// ---- marshal helpers ----
 
 func marshalDef(p *Property, ts string) ([]byte, error) {
 	st, members := p.snapshot()
@@ -156,21 +152,34 @@ func marshalDef(p *Property, ts string) ([]byte, error) {
 		for _, m := range members {
 			v.BLOBs = append(v.BLOBs, xdefBLOB{Name: m.Name, Label: m.Label})
 		}
+	case LightType:
+		// The DTD gives defLightVector no perm attribute.
+		v.XMLName = xml.Name{Local: "defLightVector"}
+		v.Perm = ""
+		for _, m := range members {
+			v.Lights = append(v.Lights, xdefLight{Name: m.Name, Label: m.Label, Value: m.Light.String()})
+		}
 	default:
-		return nil, fmt.Errorf("indi: cannot define property type %d", p.Type)
+		return nil, fmt.Errorf("indi: cannot define property type %v", p.Type)
 	}
 	return xml.Marshal(v)
 }
 
-// blobSetXML builds a setBLOBVector by hand (not via encoding/xml) — the base64
-// payload is large and the inputs are controlled, so this avoids marshaling a
-// multi-megabyte chardata string. format is e.g. ".fits"; size is the raw byte count.
-func blobSetXML(device, name, elem, format string, data []byte, ts string) []byte {
+// attrEscaper escapes the five XML-special characters; %q is not XML escaping, so
+// hand-built XML must go through this.
+var attrEscaper = strings.NewReplacer(
+	"&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&apos;")
+
+// blobSetXML builds a setBLOBVector by hand, avoiding a multi-megabyte chardata
+// string through encoding/xml; size is the uncompressed byte count, not len(data).
+func blobSetXML(device, name, elem, format string, data []byte, size int, ts string) []byte {
 	enc := base64.StdEncoding.EncodeToString(data)
 	var b strings.Builder
 	b.Grow(len(enc) + 256)
-	fmt.Fprintf(&b, `<setBLOBVector device=%q name=%q state="Ok" timestamp=%q>`, device, name, ts)
-	fmt.Fprintf(&b, `<oneBLOB name=%q size="%d" format=%q>`, elem, len(data), format)
+	fmt.Fprintf(&b, `<setBLOBVector device="%s" name="%s" state="Ok" timestamp="%s">`,
+		attrEscaper.Replace(device), attrEscaper.Replace(name), attrEscaper.Replace(ts))
+	fmt.Fprintf(&b, `<oneBLOB name="%s" size="%d" format="%s">`,
+		attrEscaper.Replace(elem), size, attrEscaper.Replace(format))
 	b.WriteString(enc)
 	b.WriteString(`</oneBLOB></setBLOBVector>`)
 	return []byte(b.String())
@@ -195,8 +204,13 @@ func marshalSet(p *Property, ts string) ([]byte, error) {
 		for _, m := range members {
 			v.Texts = append(v.Texts, xoneText{Name: m.Name, Value: m.Text})
 		}
+	case LightType:
+		v.XMLName = xml.Name{Local: "setLightVector"}
+		for _, m := range members {
+			v.Lights = append(v.Lights, xoneLight{Name: m.Name, Value: m.Light.String()})
+		}
 	default:
-		return nil, fmt.Errorf("indi: cannot set property type %d", p.Type)
+		return nil, fmt.Errorf("indi: cannot set property type %v", p.Type)
 	}
 	return xml.Marshal(v)
 }

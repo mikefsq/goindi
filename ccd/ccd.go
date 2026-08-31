@@ -1,11 +1,4 @@
-// Package ccd is a generic INDI camera (CCD) device over any frame source. It
-// exposes the standard camera properties PHD2 / Ekos drive — CCD_INFO (pixel size,
-// dimensions), CCD_EXPOSURE, and the CCD1 BLOB carrying each frame as FITS — and it
-// advertises the CCD+GUIDER interface so PHD2 lists it as a guide camera.
-//
-// It delivers RAW frames with no pixel transformation (no debayer, bin, or stretch):
-// the client does its own centroiding on the unmodified sensor data, so any
-// transformation here would wreck guiding.
+// Package ccd is a generic INDI camera (CCD) device over any frame source.
 package ccd
 
 import (
@@ -18,23 +11,22 @@ import (
 	"github.com/mikefsq/goindi/server"
 )
 
-// Camera is the frame source the device drives — the fleet adapts a concrete camera
-// (a sim camera, later astrocam) to it.
+// Camera is the frame source the device drives.
 type Camera interface {
-	PixelSizeUm() (x, y float64)                 // pixel pitch, microns
-	Size() (w, h int)                            // sensor pixels
-	BitsPerPixel() int                           // e.g. 16
-	StartExposure(seconds float64) error         // begin an exposure
-	ImageReady() bool                            // frame available?
-	Frame() (w, h int, pixels []byte, err error) // RAW little-endian, BitsPerPixel deep
+	PixelSizeUm() (x, y float64)
+	Size() (w, h int)
+	BitsPerPixel() int
+	StartExposure(seconds float64) error
+	ImageReady() bool
+	// Frame returns raw little-endian pixels, BitsPerPixel deep, undebayered.
+	Frame() (w, h int, pixels []byte, err error)
 	AbortExposure() error
 }
 
-// CameraFunc returns the live camera, or an error if not connected (called per
-// operation so a reconnect on the owning side is transparent).
+// CameraFunc returns the live camera, or an error if it is not connected.
 type CameraFunc func() (Camera, error)
 
-// Device is the INDI CCD adapter. Build it with New and register it with a server.Server.
+// Device is the INDI CCD adapter; build it with New and register it with a server.Server.
 type Device struct {
 	name string
 	cam  CameraFunc
@@ -46,16 +38,16 @@ type Device struct {
 	exposure   *server.Property // CCD_EXPOSURE
 	abort      *server.Property // CCD_ABORT_EXPOSURE
 	binning    *server.Property // CCD_BINNING
-	blob       *server.Property // CCD1 (BLOB definition)
-	controls   *server.Property // CCD_CONTROLS (gain/offset) — defined on connect if supported
-	frame      *server.Property // CCD_FRAME (subframe ROI) — defined on connect if supported
+	blob       *server.Property // CCD1
+	controls   *server.Property // CCD_CONTROLS, defined on connect when supported
+	frame      *server.Property // CCD_FRAME, defined on connect when supported
 
 	mu         sync.Mutex
 	connected  bool
 	exposing   bool
-	ctx        context.Context    // server context (set in Start); exposures derive from it
-	cancelExp  context.CancelFunc // cancels the in-flight exposure's awaitFrame goroutine
-	exposeDone chan struct{}      // closed when the in-flight awaitFrame goroutine exits
+	ctx        context.Context // set in Start; exposure contexts derive from it
+	cancelExp  context.CancelFunc
+	exposeDone chan struct{}
 }
 
 // New builds the device named name (the INDI device id clients pick) over cam.
@@ -69,7 +61,7 @@ func New(name string, cam CameraFunc) *Device {
 	d.abort = abortProperty(name)
 	d.binning = binningProperty(name)
 	d.blob = blobProperty(name)
-	if c, err := cam(); err == nil { // seed CCD_INFO so the initial def carries pixel size
+	if c, err := cam(); err == nil { // seed CCD_INFO so the initial def carries the pixel size
 		d.fillInfo(c)
 	}
 	return d
@@ -79,8 +71,7 @@ func (d *Device) Name() string { return d.name }
 
 func (d *Device) Properties() []*server.Property {
 	props := []*server.Property{d.conn, d.driverInfo, d.info, d.exposure, d.abort, d.binning, d.blob}
-	// CCD_CONTROLS / CCD_FRAME are advertised only once a capable camera has connected
-	// (see defineCaps); include them so clients connecting afterward enumerate them too.
+	// Include the optional caps so a client connecting after defineCaps still enumerates them.
 	d.mu.Lock()
 	if d.controls != nil {
 		props = append(props, d.controls)
@@ -92,10 +83,7 @@ func (d *Device) Properties() []*server.Property {
 	return props
 }
 
-// defineCaps advertises the optional CCD_CONTROLS (gain/offset) and CCD_FRAME (subframe)
-// properties the moment a camera that supports them connects, and refreshes their values
-// on every (re)connect. Real INDI camera drivers define these device-specific properties
-// post-connect; clients pick them up via newProperty.
+// Device-specific properties are defined post-connect, once the camera can report its ranges.
 func (d *Device) defineCaps(pub server.Publisher, c Camera) {
 	var define, update []*server.Property
 
@@ -151,9 +139,18 @@ func (d *Device) HandleNew(pub server.Publisher, name string, members []server.N
 		d.handleConnection(pub, members)
 	case "CCD_EXPOSURE":
 		for _, m := range members {
-			if m.Name == "CCD_EXPOSURE_VALUE" {
-				d.startExposure(pub, m.Float())
+			if m.Name != "CCD_EXPOSURE_VALUE" {
+				continue
 			}
+			secs, ok := m.Float()
+			if !ok {
+				// A malformed duration must not start an exposure.
+				d.exposure.SetState(server.Alert)
+				pub.Update(d.exposure)
+				pub.Message(d.name, fmt.Sprintf("expose: bad duration %q", m.Value))
+				continue
+			}
+			d.startExposure(pub, secs)
 		}
 	case "CCD_ABORT_EXPOSURE":
 		for _, m := range members {
@@ -169,7 +166,14 @@ func (d *Device) HandleNew(pub server.Publisher, name string, members []server.N
 		pub.Update(d.abort)
 	case "CCD_BINNING":
 		for _, m := range members {
-			d.binning.SetNumber(m.Name, m.Float())
+			v, ok := m.Float()
+			if !ok {
+				d.binning.SetState(server.Alert)
+				pub.Update(d.binning)
+				pub.Message(d.name, fmt.Sprintf("binning: bad value %q", m.Value))
+				return
+			}
+			d.binning.SetNumber(m.Name, v)
 		}
 		d.binning.SetState(server.Ok)
 		pub.Update(d.binning)
@@ -179,21 +183,26 @@ func (d *Device) HandleNew(pub server.Publisher, name string, members []server.N
 			return
 		}
 		for _, m := range members {
+			f, ok := m.Float()
+			if !ok {
+				pub.Message(d.name, fmt.Sprintf("controls: bad value %q", m.Value))
+				continue
+			}
 			switch m.Name {
 			case "Gain":
 				if gc, ok := c.(GainController); ok {
-					_ = gc.SetGain(int(m.Float()))
+					_ = gc.SetGain(int(f))
 				}
 			case "Offset":
 				if oc, ok := c.(OffsetController); ok {
-					_ = oc.SetOffset(int(m.Float()))
+					_ = oc.SetOffset(int(f))
 				}
 			}
 		}
 		d.mu.Lock()
 		p := d.controls
 		d.mu.Unlock()
-		if p != nil { // report back the values the camera actually accepted
+		if p != nil { // read back: the camera may clamp what it was given
 			if gc, ok := c.(GainController); ok {
 				gv, _, _ := gc.Gain()
 				p.SetNumber("Gain", float64(gv))
@@ -216,15 +225,20 @@ func (d *Device) HandleNew(pub server.Publisher, name string, members []server.N
 		}
 		x, y, w, h := sf.Subframe()
 		for _, m := range members {
+			f, ok := m.Float()
+			if !ok {
+				pub.Message(d.name, fmt.Sprintf("frame: bad value %q", m.Value))
+				return
+			}
 			switch m.Name {
 			case "X":
-				x = int(m.Float())
+				x = int(f)
 			case "Y":
-				y = int(m.Float())
+				y = int(f)
 			case "WIDTH":
-				w = int(m.Float())
+				w = int(f)
 			case "HEIGHT":
-				h = int(m.Float())
+				h = int(f)
 			}
 		}
 		_ = sf.SetSubframe(x, y, w, h)
@@ -266,7 +280,7 @@ func (d *Device) handleConnection(pub server.Publisher, members []server.NewMemb
 		d.setConnected(true)
 		d.conn.SetSwitch("CONNECT", true)
 		d.fillInfo(c)
-		pub.Update(d.info) // PHD2 reads CCD_INFO here for the pixel size
+		pub.Update(d.info)
 		d.defineCaps(pub, c)
 	} else {
 		c, _ := d.cam()
@@ -280,7 +294,6 @@ func (d *Device) handleConnection(pub server.Publisher, members []server.NewMemb
 	pub.Update(d.conn)
 }
 
-// fillInfo copies the camera's geometry into CCD_INFO.
 func (d *Device) fillInfo(c Camera) {
 	px, py := c.PixelSizeUm()
 	w, h := c.Size()
@@ -292,12 +305,7 @@ func (d *Device) fillInfo(c Camera) {
 	d.info.SetNumber("CCD_BITSPERPIXEL", float64(c.BitsPerPixel()))
 }
 
-// startExposure begins an exposure and, off the read loop, awaits the frame and
-// pushes it as a BLOB. A new exposure supersedes any in-flight one — stopExposure
-// cancels the prior awaitFrame goroutine and aborts the camera so StartExposure
-// always begins from a clean state. Without that, a client that re-exposes after a
-// timeout (PHD2's reconnect loop) stacks overlapping exposures on the shared camera
-// and wedges it until the fleet is restarted.
+// Supersedes any in-flight exposure: overlapping exposures wedge the camera until restart.
 func (d *Device) startExposure(pub server.Publisher, secs float64) {
 	c, err := d.cam()
 	if err != nil {
@@ -332,7 +340,7 @@ func (d *Device) awaitFrame(ctx context.Context, done chan struct{}, pub server.
 	for {
 		select {
 		case <-ctx.Done():
-			return // superseded, aborted, disconnected, or shutting down
+			return
 		case <-tick.C:
 			if !c.ImageReady() {
 				continue
@@ -345,7 +353,6 @@ func (d *Device) awaitFrame(ctx context.Context, done chan struct{}, pub server.
 				pub.Message(d.name, "frame: "+err.Error())
 				return
 			}
-			// RAW frame straight to the BLOB — no transformation.
 			pub.SendBLOB(d.name, "CCD1", "CCD1", ".fits", encodeFITS(w, h, c.BitsPerPixel(), px))
 			d.clearExposing()
 			d.exposure.SetNumber("CCD_EXPOSURE_VALUE", 0)
@@ -356,9 +363,7 @@ func (d *Device) awaitFrame(ctx context.Context, done chan struct{}, pub server.
 	}
 }
 
-// stopExposure cancels any in-flight exposure goroutine, waits for it to exit, and
-// aborts the camera so the next StartExposure starts clean. Safe to call when nothing
-// is exposing. The bounded wait keeps a blocked USB read from wedging the read loop.
+// The wait for the goroutine is bounded: a blocked USB read must not wedge the read loop.
 func (d *Device) stopExposure(c Camera) {
 	d.mu.Lock()
 	cancel, done, was := d.cancelExp, d.exposeDone, d.exposing
@@ -387,15 +392,13 @@ func (d *Device) Start(ctx context.Context, _ server.Publisher) {
 
 func (d *Device) setConnected(b bool) { d.mu.Lock(); d.connected = b; d.mu.Unlock() }
 
-// clearExposing marks the exposure finished when its goroutine completes on its own.
 func (d *Device) clearExposing() {
 	d.mu.Lock()
 	d.exposing, d.cancelExp, d.exposeDone = false, nil, nil
 	d.mu.Unlock()
 }
 
-// serverCtx is the server-lifetime context (set in Start); per-exposure contexts derive
-// from it so a server shutdown also cancels any in-flight exposure.
+// Background until Start has run, so an exposure in the startup window still completes.
 func (d *Device) serverCtx() context.Context {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -405,10 +408,8 @@ func (d *Device) serverCtx() context.Context {
 	return context.Background()
 }
 
-// encodeFITS wraps a raw mono frame in a minimal FITS file PHD2 reads directly.
-// bits selects the depth: 16-bit input is little-endian uint16 → FITS BITPIX 16 with
-// BZERO 32768 (the standard unsigned-16 carrier); 8-bit input is bytes → BITPIX 8.
-// The pixel data is otherwise untouched (raw, no transformation).
+// encodeFITS wraps a raw mono frame in a minimal FITS file. FITS has no unsigned
+// 16-bit type, so 16-bit data is biased by BZERO 32768 and written big-endian signed.
 func encodeFITS(w, h, bits int, pixels []byte) []byte {
 	bitpix, bzero := 16, 32768
 	if bits <= 8 {
@@ -440,7 +441,7 @@ func encodeFITS(w, h, bits int, pixels []byte) []byte {
 	var data []byte
 	if bitpix == 8 {
 		data = make([]byte, n)
-		copy(data, pixels) // bytes as-is (unsigned 0..255)
+		copy(data, pixels)
 	} else {
 		data = make([]byte, n*2)
 		for i := 0; i < n && (i*2+1) < len(pixels); i++ {

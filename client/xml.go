@@ -2,15 +2,8 @@ package client
 
 import (
 	"encoding/xml"
-	"strconv"
 	"strings"
 )
-
-// Wire structs for the client side, defined independently of the server package
-// so the conformance tester cross-checks the protocol rather than sharing a codec
-// with the implementation under test.
-
-// ---- outbound (client → server) ----
 
 type wGetProperties struct {
 	XMLName xml.Name `xml:"getProperties"`
@@ -24,8 +17,8 @@ type wOne struct {
 	Value string `xml:",chardata"`
 }
 
-// wNewVector marshals to newNumberVector/newSwitchVector/newTextVector per its
-// XMLName; only the matching child slice is populated.
+// wNewVector marshals to newNumberVector, newSwitchVector or newTextVector per
+// its XMLName; only the matching child slice is populated.
 type wNewVector struct {
 	XMLName  xml.Name
 	Device   string `xml:"device,attr"`
@@ -35,7 +28,12 @@ type wNewVector struct {
 	Texts    []wOne `xml:"oneText,omitempty"`
 }
 
-// ---- inbound (server → client) ----
+type wEnableBLOB struct {
+	XMLName xml.Name `xml:"enableBLOB"`
+	Device  string   `xml:"device,attr,omitempty"`
+	Name    string   `xml:"name,attr,omitempty"`
+	Mode    string   `xml:",chardata"`
+}
 
 type wDefMember struct {
 	Name   string `xml:"name,attr"`
@@ -47,8 +45,8 @@ type wDefMember struct {
 	Value  string `xml:",chardata"`
 }
 
-// wDefVector decodes any def*Vector; the element name (carried separately) selects
-// the property type, and the matching child slice is populated.
+// wDefVector decodes any def*Vector; the element name, carried separately,
+// selects the property type.
 type wDefVector struct {
 	Device   string       `xml:"device,attr"`
 	Name     string       `xml:"name,attr"`
@@ -61,15 +59,18 @@ type wDefVector struct {
 	Switches []wDefMember `xml:"defSwitch"`
 	Texts    []wDefMember `xml:"defText"`
 	Lights   []wDefMember `xml:"defLight"`
+	BLOBs    []wDefMember `xml:"defBLOB"`
 }
 
 type wSetVector struct {
 	Device   string `xml:"device,attr"`
 	Name     string `xml:"name,attr"`
 	State    string `xml:"state,attr"`
+	Message  string `xml:"message,attr"`
 	Numbers  []wOne `xml:"oneNumber"`
 	Switches []wOne `xml:"oneSwitch"`
 	Texts    []wOne `xml:"oneText"`
+	Lights   []wOne `xml:"oneLight"`
 }
 
 type wDelProperty struct {
@@ -78,8 +79,9 @@ type wDelProperty struct {
 }
 
 type wMessage struct {
-	Device  string `xml:"device,attr"`
-	Message string `xml:"message,attr"`
+	Device    string `xml:"device,attr"`
+	Timestamp string `xml:"timestamp,attr"`
+	Message   string `xml:"message,attr"`
 }
 
 func typeOf(elem string) string {
@@ -98,8 +100,10 @@ func typeOf(elem string) string {
 	return ""
 }
 
+// atof discards ParseNumber's ok result, for callers that read a missing or
+// malformed value as zero.
 func atof(s string) float64 {
-	f, _ := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	f, _ := ParseNumber(s)
 	return f
 }
 

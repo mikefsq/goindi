@@ -1,16 +1,11 @@
-// Package server is a clean-room, dependency-free implementation of the INDI
-// wire protocol's server side: the XML framing, a property/device model, and a
-// hub that multiplexes any number of devices over one TCP port (the conventional
-// :7624) by the device name on every message — exactly what indiserver does
-// internally, but in-process, with Go device objects instead of spawned binaries.
-//
-// It is the INDI analogue of goalpaca/server: a driver implements the Device
-// interface and registers it; the same underlying hardware object (a lx200.Mount,
-// an asicam camera) is the single source of truth, and this server is just one
-// more native front-end onto it alongside Alpaca and the LX200 bridge.
+// Package server implements the INDI wire protocol's server side: XML framing, a
+// property/device model, and a hub that multiplexes devices over one TCP port.
 package server
 
-import "sync"
+import (
+	"strconv"
+	"sync"
+)
 
 // PropType is the INDI property vector type.
 type PropType int
@@ -22,6 +17,22 @@ const (
 	LightType
 	BLOBType
 )
+
+func (t PropType) String() string {
+	switch t {
+	case NumberType:
+		return "Number"
+	case SwitchType:
+		return "Switch"
+	case TextType:
+		return "Text"
+	case LightType:
+		return "Light"
+	case BLOBType:
+		return "BLOB"
+	}
+	return "PropType(" + strconv.Itoa(int(t)) + ")"
+}
 
 // State is the INDI property state (light), shared by a whole vector.
 type State int
@@ -107,10 +118,8 @@ type Member struct {
 	Light State
 }
 
-// Property is an INDI property vector: a named group of members with a shared
-// state and permission. It is the unit a client defines/sets and a device
-// updates. Safe for concurrent use by a device's command handler and its
-// background poll loop.
+// Property is an INDI property vector, a named group of members sharing one state
+// and permission, safe for concurrent use.
 type Property struct {
 	Device  string
 	Name    string
@@ -126,15 +135,18 @@ type Property struct {
 	members []*Member
 }
 
-// NewProperty builds a property with the given members (state defaults to Idle).
+// NewProperty builds a property with the given members, in state Idle.
 func NewProperty(device, name string, t PropType, perm Perm, members ...*Member) *Property {
 	return &Property{Device: device, Name: name, Type: t, Perm: perm, members: members}
 }
 
-func (p *Property) State() State     { p.mu.Lock(); defer p.mu.Unlock(); return p.state }
+// State reports the vector's state.
+func (p *Property) State() State { p.mu.Lock(); defer p.mu.Unlock(); return p.state }
+
+// SetState sets the vector's state.
 func (p *Property) SetState(s State) { p.mu.Lock(); p.state = s; p.mu.Unlock() }
 
-// member returns the named member; caller holds mu.
+// member returns the named member; the caller holds mu.
 func (p *Property) member(name string) *Member {
 	for _, m := range p.members {
 		if m.Name == name {
@@ -144,6 +156,7 @@ func (p *Property) member(name string) *Member {
 	return nil
 }
 
+// SetNumber sets a number member's value, ignoring an unknown name.
 func (p *Property) SetNumber(name string, v float64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -152,6 +165,7 @@ func (p *Property) SetNumber(name string, v float64) {
 	}
 }
 
+// Number returns a number member's value, or 0 if there is no such member.
 func (p *Property) Number(name string) float64 {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -161,22 +175,35 @@ func (p *Property) Number(name string) float64 {
 	return 0
 }
 
-// SetSwitch sets a switch member. For a OneOfMany vector, turning one On turns the
-// rest Off, preserving the radio invariant.
+// SetSwitch sets a switch member, enforcing the vector's rule: OneOfMany and
+// AtMostOne turn the other members Off, and OneOfMany refuses an Off that would
+// leave none On.
 func (p *Property) SetSwitch(name string, on bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.Rule == OneOfMany && on {
-		for _, m := range p.members {
-			m.On = m.Name == name
-		}
+	m := p.member(name)
+	if m == nil {
 		return
 	}
-	if m := p.member(name); m != nil {
+	switch {
+	case on && (p.Rule == OneOfMany || p.Rule == AtMostOne):
+		for _, o := range p.members {
+			o.On = o == m
+		}
+	case !on && p.Rule == OneOfMany:
+		for _, o := range p.members {
+			if o != m && o.On {
+				m.On = false
+				return
+			}
+		}
+		// Falling out of the loop means m is the only member On: refuse.
+	default:
 		m.On = on
 	}
 }
 
+// Switch reports whether a switch member is On.
 func (p *Property) Switch(name string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -186,6 +213,7 @@ func (p *Property) Switch(name string) bool {
 	return false
 }
 
+// SetText sets a text member's value, ignoring an unknown name.
 func (p *Property) SetText(name, s string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -194,8 +222,8 @@ func (p *Property) SetText(name, s string) {
 	}
 }
 
-// snapshot returns the state and a value-copy of the members under lock, for the
-// marshaler to render without racing a concurrent device update.
+// snapshot copies the state and members under lock so the marshaler cannot race a
+// concurrent device update.
 func (p *Property) snapshot() (State, []Member) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

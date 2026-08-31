@@ -1,9 +1,6 @@
-// Command indiconform is the ConformU analogue for INDI: it connects to an INDI
-// server and reports whether each device conforms to the protocol and the
-// standard property contracts. Exit status is non-zero if any check fails.
-//
-//	indiconform -addr localhost:7624
-//	indiconform -addr localhost:7624 -device "10Micron" -mutate=false
+// Command indiconform connects to an INDI server and reports whether each device
+// conforms to the protocol and the standard property contracts, exiting non-zero if
+// any check fails.
 package main
 
 import (
@@ -20,10 +17,11 @@ import (
 func main() {
 	addr := flag.String("addr", "localhost:7624", "INDI server host:port")
 	device := flag.String("device", "", "limit to one device (default: all discovered)")
-	mutate := flag.Bool("mutate", true, "run state-changing checks (connect, guide pulse)")
+	mutate := flag.Bool("mutate", false, "run state-changing checks (connect, guide pulse, test exposure); devices conform connects are disconnected afterwards")
+	timeout := flag.Duration("timeout", 30*time.Second, "overall run timeout")
 	flag.Parse()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
 	c, err := client.Dial(ctx, *addr)
@@ -33,7 +31,7 @@ func main() {
 	}
 	defer c.Close()
 
-	results := conform.Run(c, conform.Options{Device: *device, Mutate: *mutate})
+	results := conform.Run(ctx, c, conform.Options{Device: *device, Mutate: *mutate})
 
 	for _, r := range results {
 		line := fmt.Sprintf("[%-4s] %s", r.Status, r.Check)

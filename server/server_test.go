@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"sync"
@@ -13,7 +14,6 @@ import (
 	"github.com/mikefsq/goindi/server"
 )
 
-// blobDev exposes a single CCD1 BLOB property, for the BLOB-gating test.
 type blobDev struct{ props []*server.Property }
 
 func newBlobDev() *blobDev {
@@ -40,8 +40,8 @@ func drainFor(c net.Conn, d time.Duration) string {
 	}
 }
 
-// TestSendBLOBGating verifies a BLOB reaches only clients that asked for it via
-// enableBLOB — the INDI rule PHD2 relies on (it sends enableBLOB before capturing).
+// TestSendBLOBGating checks that a BLOB reaches only the clients that asked for
+// it with enableBLOB.
 func TestSendBLOBGating(t *testing.T) {
 	s := startServer(t, newBlobDev())
 
@@ -58,11 +58,11 @@ func TestSendBLOBGating(t *testing.T) {
 
 	fmt.Fprint(enabled, `<getProperties version="1.7"/>`)
 	fmt.Fprint(plain, `<getProperties version="1.7"/>`)
-	drainFor(enabled, 100*time.Millisecond) // consume the initial defs
+	drainFor(enabled, 100*time.Millisecond)
 	drainFor(plain, 100*time.Millisecond)
 
 	fmt.Fprint(enabled, `<enableBLOB device="Blob" name="CCD1">Also</enableBLOB>`)
-	time.Sleep(80 * time.Millisecond) // let the server register it
+	time.Sleep(80 * time.Millisecond) // the server must register the policy before the send below
 
 	s.SendBLOB("Blob", "CCD1", "CCD1", ".fits", []byte{0, 1, 2, 3, 4})
 
@@ -75,8 +75,6 @@ func TestSendBLOBGating(t *testing.T) {
 	}
 }
 
-// fakeDev is a minimal Device: it records the new-vectors it receives and echoes
-// the touched property back as a set-vector.
 type fakeDev struct {
 	mu    sync.Mutex
 	got   map[string][]server.NewMember
@@ -112,7 +110,6 @@ func (f *fakeDev) received(name string) []server.NewMember {
 	return f.got[name]
 }
 
-// elem is a permissive decode target for any INDI element the server sends.
 type elem struct {
 	XMLName   xml.Name
 	Device    string `xml:"device,attr"`
@@ -179,6 +176,8 @@ func readElem(t *testing.T, dec *xml.Decoder) elem {
 	}
 }
 
+// TestGetPropertiesEnumeratesDevice checks that getProperties returns a def for
+// every property of a device.
 func TestGetPropertiesEnumeratesDevice(t *testing.T) {
 	s := startServer(t, newFakeDev())
 	c, dec := dial(t, s)
@@ -197,6 +196,8 @@ func TestGetPropertiesEnumeratesDevice(t *testing.T) {
 	}
 }
 
+// TestNewVectorDispatchesAndEchoes checks that a new*Vector reaches the device
+// and the resulting set*Vector reaches the client.
 func TestNewVectorDispatchesAndEchoes(t *testing.T) {
 	f := newFakeDev()
 	s := startServer(t, f)
@@ -204,7 +205,7 @@ func TestNewVectorDispatchesAndEchoes(t *testing.T) {
 
 	fmt.Fprint(c, `<getProperties version="1.7"/>`)
 	readElem(t, dec)
-	readElem(t, dec) // drain the two defs
+	readElem(t, dec)
 
 	fmt.Fprint(c, `<newSwitchVector device="Fake" name="CONNECTION"><oneSwitch name="CONNECT">On</oneSwitch></newSwitchVector>`)
 
@@ -218,6 +219,115 @@ func TestNewVectorDispatchesAndEchoes(t *testing.T) {
 	}
 }
 
+// TestCharsetProcInst checks that an ISO-8859-1 XML declaration does not kill the
+// connection.
+func TestCharsetProcInst(t *testing.T) {
+	s := startServer(t, newFakeDev())
+	c, dec := dial(t, s)
+	fmt.Fprint(c, `<?xml version="1.0" encoding="ISO-8859-1"?><getProperties version="1.7"/>`)
+	if e := readElem(t, dec); e.Device != "Fake" {
+		t.Errorf("expected a def for device Fake after latin-1 ProcInst, got %+v", e)
+	}
+}
+
+// TestMalformedXMLDropsClientOnly checks that garbage bytes drop only the
+// offending client, leaving the hub serving.
+func TestMalformedXMLDropsClientOnly(t *testing.T) {
+	s := startServer(t, newFakeDev())
+
+	bad, decBad := dial(t, s)
+	fmt.Fprint(bad, `<getProperties version="1.7"/>`)
+	readElem(t, decBad)
+	readElem(t, decBad)
+
+	fmt.Fprint(bad, "<<<\x01 not xml %%%")
+	// A clean EOF means the server closed the connection; a deadline error would
+	// mean it left the client connected.
+	if _, err := io.ReadAll(bad); err != nil {
+		t.Errorf("server did not drop the malformed client: read err %v", err)
+	}
+
+	good, decGood := dial(t, s)
+	fmt.Fprint(good, `<getProperties version="1.7"/>`)
+	if e := readElem(t, decGood); e.Device != "Fake" {
+		t.Errorf("second client not served after malformed peer, got %+v", e)
+	}
+}
+
+type starterDev struct {
+	name    string
+	started chan struct{}
+	props   []*server.Property
+}
+
+func newStarterDev(name string) *starterDev {
+	return &starterDev{name: name, started: make(chan struct{}),
+		props: []*server.Property{server.ConnectionProperty(name)}}
+}
+
+func (d *starterDev) Name() string                                           { return d.name }
+func (d *starterDev) Properties() []*server.Property                         { return d.props }
+func (d *starterDev) HandleNew(server.Publisher, string, []server.NewMember) {}
+func (d *starterDev) Start(ctx context.Context, pub server.Publisher)        { close(d.started) }
+
+// TestAddDeviceAfterServeStartsStarter checks that a Starter registered while the
+// hub is already serving is started and enumerated.
+func TestAddDeviceAfterServeStartsStarter(t *testing.T) {
+	s := startServer(t)
+	late := newStarterDev("Late")
+	if err := s.AddDevice(late); err != nil {
+		t.Fatalf("AddDevice after Serve: %v", err)
+	}
+	select {
+	case <-late.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Starter added after Serve was never started")
+	}
+	c, dec := dial(t, s)
+	fmt.Fprint(c, `<getProperties version="1.7"/>`)
+	if e := readElem(t, dec); e.Device != "Late" {
+		t.Errorf("late device not enumerated: %+v", e)
+	}
+}
+
+// TestSwitchRules checks that SetSwitch enforces each SwitchRule.
+func TestSwitchRules(t *testing.T) {
+	one := server.ConnectionProperty("Dev")
+	one.SetSwitch("DISCONNECT", false)
+	if !one.Switch("DISCONNECT") {
+		t.Error("OneOfMany: Off leaving zero members On must be refused")
+	}
+	one.SetSwitch("CONNECT", true)
+	if !one.Switch("CONNECT") || one.Switch("DISCONNECT") {
+		t.Error("OneOfMany: turning CONNECT On must turn DISCONNECT Off")
+	}
+
+	pier := server.PierSideProperty("Dev")
+	pier.SetSwitch("PIER_WEST", true)
+	pier.SetSwitch("PIER_EAST", true)
+	if pier.Switch("PIER_WEST") || !pier.Switch("PIER_EAST") {
+		t.Error("AtMostOne: turning one On must turn the others Off")
+	}
+	pier.SetSwitch("PIER_EAST", false)
+	if pier.Switch("PIER_EAST") || pier.Switch("PIER_WEST") {
+		t.Error("AtMostOne: all-Off must be allowed")
+	}
+
+	any := server.NewProperty("Dev", "FLAGS", server.SwitchType, server.RW,
+		&server.Member{Name: "A", On: true}, &server.Member{Name: "B"})
+	any.Rule = server.AnyOfMany
+	any.SetSwitch("B", true)
+	if !any.Switch("A") || !any.Switch("B") {
+		t.Error("AnyOfMany: members must toggle independently")
+	}
+	any.SetSwitch("A", false)
+	any.SetSwitch("B", false)
+	if any.Switch("A") || any.Switch("B") {
+		t.Error("AnyOfMany: all-Off must be allowed")
+	}
+}
+
+// TestDuplicateDeviceRejected checks that AddDevice refuses a name already in use.
 func TestDuplicateDeviceRejected(t *testing.T) {
 	s := server.New("127.0.0.1:0")
 	if err := s.AddDevice(newFakeDev()); err != nil {

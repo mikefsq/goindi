@@ -6,8 +6,6 @@ func num(name, label, format string, min, max, val float64) *server.Member {
 	return &server.Member{Name: name, Label: label, Format: format, Min: min, Max: max, Num: val}
 }
 
-// ccdInfoProperty is the standard CCD_INFO (pixel size + geometry, read-only) PHD2
-// reads to compute pixel scale.
 func ccdInfoProperty(device string) *server.Property {
 	p := server.NewProperty(device, "CCD_INFO", server.NumberType, server.RO,
 		num("CCD_MAX_X", "Width", "%.0f", 0, 1e6, 0),
@@ -21,8 +19,7 @@ func ccdInfoProperty(device string) *server.Property {
 	return p
 }
 
-// exposureProperty is CCD_EXPOSURE — writing CCD_EXPOSURE_VALUE (seconds) starts an
-// exposure; the device holds it Busy until the frame is delivered.
+// Writing CCD_EXPOSURE_VALUE starts an exposure; it stays Busy until the frame lands.
 func exposureProperty(device string) *server.Property {
 	p := server.NewProperty(device, "CCD_EXPOSURE", server.NumberType, server.RW,
 		num("CCD_EXPOSURE_VALUE", "Duration (s)", "%.3f", 0, 3600, 1))
@@ -48,9 +45,7 @@ func binningProperty(device string) *server.Property {
 	return p
 }
 
-// controlsProperty is CCD_CONTROLS — the ZWO/ASI convention for camera tuning, set
-// from the INDI control panel. Gain is always present; Offset is added only when the
-// camera supports it. Defined on connect (its range comes from the live camera).
+// Ranges come from the live camera, so this is built on connect, not at New.
 func controlsProperty(device string, gain, gmin, gmax, off, omin, omax int, hasOffset bool) *server.Property {
 	members := []*server.Member{
 		num("Gain", "Gain", "%.0f", float64(gmin), float64(gmax), float64(gain)),
@@ -64,8 +59,6 @@ func controlsProperty(device string, gain, gmin, gmax, off, omin, omax int, hasO
 	return p
 }
 
-// frameProperty is CCD_FRAME — the subframe/ROI window in sensor pixels. PHD2 sets it
-// to guide on a small region; the default and bounds are the full sensor.
 func frameProperty(device string, x, y, w, h, maxW, maxH int) *server.Property {
 	p := server.NewProperty(device, "CCD_FRAME", server.NumberType, server.RW,
 		num("X", "Left", "%.0f", 0, float64(maxW), float64(x)),
@@ -77,8 +70,7 @@ func frameProperty(device string, x, y, w, h, maxW, maxH int) *server.Property {
 	return p
 }
 
-// blobProperty defines the CCD1 BLOB (the frame). Its data is delivered via the
-// server's SendBLOB, not stored on the property.
+// Frame bytes go out through Server.SendBLOB; nothing is stored on the property.
 func blobProperty(device string) *server.Property {
 	p := server.NewProperty(device, "CCD1", server.BLOBType, server.RO,
 		&server.Member{Name: "CCD1", Label: "Image"})

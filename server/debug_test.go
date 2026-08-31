@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-// TestDebugGating verifies lifecycle logs (s.log) always reach the logger while
-// traffic logs (s.dlog) are emitted only when WithDebug(true) is set.
+// TestDebugGating checks that traffic logs are emitted only under WithDebug(true)
+// while lifecycle logs always are.
 func TestDebugGating(t *testing.T) {
 	for _, tc := range []struct {
 		debug       bool
@@ -20,8 +20,8 @@ func TestDebugGating(t *testing.T) {
 		capture := func(f string, a ...any) { lines = append(lines, strings.TrimSpace(fmt.Sprintf(f, a...))) }
 		s := New(":0", WithLogger(capture), WithDebug(tc.debug))
 
-		s.log("indi: lifecycle event")     // always
-		s.dlog("indi: <- traffic message") // debug-only
+		s.log("indi: lifecycle event")
+		s.dlog("indi: <- traffic message")
 
 		gotLifecycle := containsPrefix(lines, "indi: lifecycle")
 		gotTraffic := containsPrefix(lines, "indi: <- traffic")
