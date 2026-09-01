@@ -44,16 +44,54 @@ type BlobInfo struct {
 // BlobSink routes each BLOB payload's decoded bytes to a writer chosen per
 // payload, closing it when the payload ends (through CloseWithError if it ended
 // incomplete); returning nil discards the payload.
+//
+// One sink serves the whole connection. Consumers that own a single device
+// should use BlobSinkFor instead: registering here twice replaces the first
+// sink, which on a server with two cameras silently sends both streams to
+// whichever consumer registered last.
 func (c *Client) BlobSink(fn func(BlobInfo) io.Writer) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.blobSink = fn
 }
 
+// BlobSinkFor routes one device's BLOBs, so several consumers can share a
+// connection without displacing each other. A device with no sink of its own
+// falls back to BlobSink's.
+//
+// An indiserver multiplexes every device onto one connection, so two cameras
+// arrive on the same stream; a client that registers a sink per camera through
+// BlobSink keeps only the last, and the other camera exposes forever without
+// ever producing an image. Passing nil removes the device's sink.
+func (c *Client) BlobSinkFor(device string, fn func(BlobInfo) io.Writer) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if fn == nil {
+		delete(c.blobSinks, device)
+		return
+	}
+	if c.blobSinks == nil {
+		c.blobSinks = map[string]func(BlobInfo) io.Writer{}
+	}
+	c.blobSinks[device] = fn
+}
+
 // BufferBlobs collects each payload in memory and hands it to fn complete; fn
 // runs on the read loop, so it must not block.
 func (c *Client) BufferBlobs(fn func(BlobInfo, []byte)) {
 	c.BlobSink(func(info BlobInfo) io.Writer {
+		b := &blobBuf{info: info, fn: fn}
+		if info.Size > 0 {
+			b.buf = make([]byte, 0, info.Size)
+		}
+		return b
+	})
+}
+
+// BufferBlobsFor is BufferBlobs for one device, so several consumers can share a
+// connection without displacing each other's sinks. See BlobSinkFor.
+func (c *Client) BufferBlobsFor(device string, fn func(BlobInfo, []byte)) {
+	c.BlobSinkFor(device, func(info BlobInfo) io.Writer {
 		b := &blobBuf{info: info, fn: fn}
 		if info.Size > 0 {
 			b.buf = make([]byte, 0, info.Size)
@@ -72,9 +110,14 @@ func (b *blobBuf) Write(p []byte) (int, error) { b.buf = append(b.buf, p...); re
 func (b *blobBuf) Close() error                { b.fn(b.info, b.buf); return nil }
 func (b *blobBuf) CloseWithError(error) error  { b.buf = nil; return nil } // incomplete: never delivered to fn
 
-func (c *Client) sink() func(BlobInfo) io.Writer {
+// sinkFor picks the sink for a payload: the device's own if it has one, else
+// the connection-wide one.
+func (c *Client) sinkFor(device string) func(BlobInfo) io.Writer {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if fn, ok := c.blobSinks[device]; ok {
+		return fn
+	}
 	return c.blobSink
 }
 
@@ -126,7 +169,7 @@ func (c *Client) readOneBlob(dec *xml.Decoder, device, prop string, se xml.Start
 
 	// Servers send <oneBLOB size='0' enclen='0'> for state-only updates, which
 	// must not reach the sink as empty payloads.
-	fn := c.sink()
+	fn := c.sinkFor(device)
 	var dst io.Writer
 	b64 := &b64Writer{} // nil w discards, keeping the stream in sync
 	engage := func() {

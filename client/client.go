@@ -81,17 +81,18 @@ type Client struct {
 	conn net.Conn
 	done chan struct{}
 
-	mu       sync.Mutex
-	updated  chan struct{} // closed and replaced on every store change; Wait-family waiters listen on it
-	blobSink func(BlobInfo) io.Writer
-	store    map[string]map[string]*Property
-	order    []string
-	messages []Message // a ring once maxMessages is reached
-	msgNext  int
-	logf     func(format string, args ...any)
-	softErrs int64
-	closed   bool
-	err      error
+	mu        sync.Mutex
+	updated   chan struct{} // closed and replaced on every store change; Wait-family waiters listen on it
+	blobSink  func(BlobInfo) io.Writer
+	blobSinks map[string]func(BlobInfo) io.Writer // per device; takes precedence over blobSink
+	store     map[string]map[string]*Property
+	order     []string
+	messages  []Message // a ring once maxMessages is reached
+	msgNext   int
+	logf      func(format string, args ...any)
+	softErrs  int64
+	closed    bool
+	err       error
 }
 
 // Dial connects to an INDI server at addr ("host:port") and starts reading.
