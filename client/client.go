@@ -5,6 +5,7 @@ package client
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -434,8 +435,15 @@ func (c *Client) Messages() []Message {
 // pred; on timeout or connection death it returns the last-known snapshot and an
 // error.
 func (c *Client) WaitRev(device, name string, sinceRev uint64, pred func(Property) bool, timeout time.Duration) (Property, error) {
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return c.WaitRevCtx(ctx, device, name, sinceRev, pred)
+}
+
+// WaitRevCtx is WaitRev bounded by a context; both are implemented here. A
+// cancelled context and an expired deadline are reported differently, so a
+// caller can tell its own cancel from an unresponsive device.
+func (c *Client) WaitRevCtx(ctx context.Context, device, name string, sinceRev uint64, pred func(Property) bool) (Property, error) {
 	for {
 		c.mu.Lock()
 		ch := c.updated
@@ -455,8 +463,11 @@ func (c *Client) WaitRev(device, name string, sinceRev uint64, pred func(Propert
 		}
 		select {
 		case <-ch:
-		case <-timer.C:
-			return snap, fmt.Errorf("indi client: timeout waiting for %s.%s", device, name)
+		case <-ctx.Done():
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return snap, fmt.Errorf("indi client: timeout waiting for %s.%s", device, name)
+			}
+			return snap, fmt.Errorf("indi client: waiting for %s.%s: %w", device, name, ctx.Err())
 		}
 	}
 }
@@ -465,33 +476,60 @@ func (c *Client) WaitRev(device, name string, sinceRev uint64, pred func(Propert
 // state, false) on timeout or connection death; pred may be satisfied by cached
 // pre-command state, so use WaitRev to await an acknowledgement.
 func (c *Client) Wait(device, name string, pred func(Property) bool, timeout time.Duration) (Property, bool) {
-	deadline := time.Now().Add(timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return c.WaitCtx(ctx, device, name, pred)
+}
+
+// WaitCtx is Wait bounded by a context; like Wait it may be satisfied by cached
+// pre-command state, so use WaitRevCtx to await an acknowledgement. It polls
+// rather than waking on updates, keeping Wait's contract that already-satisfied
+// state returns immediately.
+func (c *Client) WaitCtx(ctx context.Context, device, name string, pred func(Property) bool) (Property, bool) {
+	t := time.NewTicker(5 * time.Millisecond)
+	defer t.Stop()
 	for {
 		if p, ok := c.Property(device, name); ok && pred(p) {
 			return p, true
 		}
-		if c.isClosed() || !time.Now().Before(deadline) {
+		if c.isClosed() {
 			p, _ := c.Property(device, name)
 			return p, false
 		}
-		time.Sleep(5 * time.Millisecond)
+		select {
+		case <-t.C:
+		case <-ctx.Done():
+			p, _ := c.Property(device, name)
+			return p, false
+		}
 	}
 }
 
 // WaitDevices polls until at least n devices are known, returning early if the
 // connection dies.
 func (c *Client) WaitDevices(n int, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return c.WaitDevicesCtx(ctx, n)
+}
+
+// WaitDevicesCtx is WaitDevices bounded by a context.
+func (c *Client) WaitDevicesCtx(ctx context.Context, n int) bool {
+	t := time.NewTicker(5 * time.Millisecond)
+	defer t.Stop()
+	for {
 		if len(c.Devices()) >= n {
 			return true
 		}
 		if c.isClosed() {
 			return false
 		}
-		time.Sleep(5 * time.Millisecond)
+		select {
+		case <-t.C:
+		case <-ctx.Done():
+			return len(c.Devices()) >= n // a device may have arrived since the last poll
+		}
 	}
-	return len(c.Devices()) >= n
 }
 
 func (c *Client) isClosed() bool {
@@ -503,20 +541,43 @@ func (c *Client) isClosed() bool {
 // SetNumberAndWait sends a newNumberVector and blocks until the device
 // acknowledges it with the first post-command update in state Ok or Alert.
 func (c *Client) SetNumberAndWait(device, name string, vals map[string]float64, timeout time.Duration) (Property, error) {
-	return c.setAndWait(device, name, timeout, func() error { return c.SetNumber(device, name, vals) })
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return c.SetNumberAndWaitCtx(ctx, device, name, vals)
+}
+
+// SetNumberAndWaitCtx is SetNumberAndWait bounded by a context. The send itself
+// is not cancellable: once the vector is on the wire the device acts on it, so
+// abandoning the wait abandons the wait and not the command.
+func (c *Client) SetNumberAndWaitCtx(ctx context.Context, device, name string, vals map[string]float64) (Property, error) {
+	return c.setAndWaitCtx(ctx, device, name, func() error { return c.SetNumber(device, name, vals) })
 }
 
 // SetSwitchAndWait is SetSwitch with SetNumberAndWait's acknowledgement wait.
 func (c *Client) SetSwitchAndWait(device, name string, states map[string]bool, timeout time.Duration) (Property, error) {
-	return c.setAndWait(device, name, timeout, func() error { return c.SetSwitch(device, name, states) })
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return c.SetSwitchAndWaitCtx(ctx, device, name, states)
+}
+
+// SetSwitchAndWaitCtx is SetSwitchAndWait bounded by a context.
+func (c *Client) SetSwitchAndWaitCtx(ctx context.Context, device, name string, states map[string]bool) (Property, error) {
+	return c.setAndWaitCtx(ctx, device, name, func() error { return c.SetSwitch(device, name, states) })
 }
 
 // SetTextAndWait is SetText with SetNumberAndWait's acknowledgement wait.
 func (c *Client) SetTextAndWait(device, name string, vals map[string]string, timeout time.Duration) (Property, error) {
-	return c.setAndWait(device, name, timeout, func() error { return c.SetText(device, name, vals) })
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return c.SetTextAndWaitCtx(ctx, device, name, vals)
 }
 
-func (c *Client) setAndWait(device, name string, timeout time.Duration, send func() error) (Property, error) {
+// SetTextAndWaitCtx is SetTextAndWait bounded by a context.
+func (c *Client) SetTextAndWaitCtx(ctx context.Context, device, name string, vals map[string]string) (Property, error) {
+	return c.setAndWaitCtx(ctx, device, name, func() error { return c.SetText(device, name, vals) })
+}
+
+func (c *Client) setAndWaitCtx(ctx context.Context, device, name string, send func() error) (Property, error) {
 	var since uint64
 	if p, ok := c.Property(device, name); ok {
 		// Recorded before the command, so only a later update can satisfy the wait.
@@ -525,9 +586,9 @@ func (c *Client) setAndWait(device, name string, timeout time.Duration, send fun
 	if err := send(); err != nil {
 		return Property{}, err
 	}
-	p, err := c.WaitRev(device, name, since, func(p Property) bool {
+	p, err := c.WaitRevCtx(ctx, device, name, since, func(p Property) bool {
 		return p.State == "Ok" || p.State == "Alert"
-	}, timeout)
+	})
 	if err != nil {
 		return p, err
 	}
