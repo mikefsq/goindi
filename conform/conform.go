@@ -325,16 +325,45 @@ func connectCheck(ctx context.Context, c *client.Client, dev string, opts Option
 }
 
 // disconnectCheck restores the device to its pre-run state after conform connected it.
+//
+// # IPS_IDLE is a terminal state for CONNECTION
+//
+// This cannot use SetSwitchAndWait, and the reason is a property of the reference implementation
+// rather than a preference. libindi acknowledges a SUCCESSFUL disconnect with IPS_IDLE:
+//
+//	// defaultdevice.cpp, the DISCONNECT branch
+//	if (Disconnect())
+//	{
+//	    setConnected(false, IPS_IDLE);
+//	    updateProperties();
+//	}
+//
+// SetSwitchAndWait waits for Ok or Alert, which is right for every other vector and wrong for this
+// one — so the wait ran to the full timeout on a device that had disconnected instantly, and this
+// check warned about all eight libindi simulators. A validator that reports the reference
+// implementation as non-conforming is worse than no validator: it teaches its users to ignore it.
+//
+// Busy is the only state meaning "still working", so anything else is an answer.
 func disconnectCheck(ctx context.Context, c *client.Client, dev string, opts Options, r *report) {
 	check := "DISCONNECT restores initial state"
-	p, err := c.SetSwitchAndWait(dev, "CONNECTION", map[string]bool{"DISCONNECT": true}, waitBudget(ctx, opts.Timeout))
-	switch {
-	case err != nil && p.State == "Alert":
+	var since uint64
+	if cur, ok := c.Property(dev, "CONNECTION"); ok {
+		since = cur.Rev // recorded before commanding, so only a later update satisfies the wait
+	}
+	if err := c.SetSwitch(dev, "CONNECTION", map[string]bool{"DISCONNECT": true}); err != nil {
 		r.fail(check, err.Error())
+		return
+	}
+	p, err := c.WaitRev(dev, "CONNECTION", since, func(p client.Property) bool {
+		return p.State != "Busy"
+	}, waitBudget(ctx, opts.Timeout))
+	switch {
 	case err != nil:
 		r.warn(check, "CONNECTION did not settle after DISCONNECT: "+err.Error())
+	case p.State == "Alert":
+		r.fail(check, "CONNECTION settled Alert after DISCONNECT: "+p.Message)
 	case !on(p, "DISCONNECT"):
-		r.fail(check, "CONNECTION settled Ok but DISCONNECT is not On")
+		r.fail(check, "CONNECTION settled but DISCONNECT is not On")
 	default:
 		r.pass(check)
 	}
@@ -508,15 +537,38 @@ func inflatedLen(data []byte) (int64, error) {
 }
 
 // pulseCheck issues a 10ms guide pulse and reports whether the device acknowledges it.
+// pulseCheck commands a short guide pulse. A timed guide is an INITIATOR, so the check is that the
+// driver ACCEPTED it — not that the vector reached Ok, which it never does.
+//
+// libindi's GuiderInterface starts a pulse by putting the vector in IPS_BUSY and finishes it with
+// IPS_IDLE (`indiguiderinterface.cpp:127`: `GuideNSNP.setState(IPS_IDLE)` in GuideComplete). Ok is
+// not in that sequence at all, so SetNumberAndWait — which waits for Ok or Alert — ran to the full
+// timeout on a pulse that had been accepted and completed normally, and warned about the reference
+// implementation.
+//
+// A 10 ms pulse can also be OVER before the wait starts, so Busy and Idle are both passes: the
+// first is "running", the second is "ran". Only Alert is a refusal.
 func pulseCheck(ctx context.Context, c *client.Client, dev, prop, member string, opts Options, r *report) {
 	check := "pulse guide accepted: " + prop
 	before := len(c.Messages())
-	p, err := c.SetNumberAndWait(dev, prop, map[string]float64{member: 10}, waitBudget(ctx, opts.Timeout))
+	var since uint64
+	if cur, ok := c.Property(dev, prop); ok {
+		since = cur.Rev
+	}
+	var p client.Property
+	err := c.SetNumber(dev, prop, map[string]float64{member: 10})
+	if err == nil {
+		p, err = c.WaitRev(dev, prop, since, func(p client.Property) bool {
+			return p.State != "Busy" || on(p, member)
+		}, waitBudget(ctx, opts.Timeout))
+	}
 	switch {
 	case err != nil && p.State == "Alert":
 		r.fail(check, err.Error())
 	case err != nil:
-		r.warn(check, prop+" did not settle Ok: "+err.Error())
+		r.warn(check, prop+" was not acknowledged: "+err.Error())
+	case p.State == "Alert":
+		r.fail(check, prop+" refused the pulse: "+p.Message)
 	default:
 		r.pass(check)
 	}
