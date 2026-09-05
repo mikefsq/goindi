@@ -10,8 +10,6 @@ import (
 	"github.com/mikefsq/goindi/client"
 )
 
-// TestWaitRevCtxReturnsOnCancelRatherThanAtTheDeadline checks that cancelling
-// ends a wait promptly and reports context.Canceled, not a timeout.
 func TestWaitRevCtxReturnsOnCancelRatherThanAtTheDeadline(t *testing.T) {
 	const defP = `<defNumberVector device="D" name="P" state="Ok" perm="rw">` +
 		`<defNumber name="M" label="M" format="%g" min="0" max="10" step="1">1</defNumber></defNumberVector>`
@@ -46,8 +44,6 @@ func TestWaitRevCtxReturnsOnCancelRatherThanAtTheDeadline(t *testing.T) {
 	}
 }
 
-// TestWaitRevCtxStillReportsADeadlineAsATimeout checks the other half: an
-// expired deadline still reads as a timeout.
 func TestWaitRevCtxStillReportsADeadlineAsATimeout(t *testing.T) {
 	const defP = `<defNumberVector device="D" name="P" state="Ok" perm="rw">` +
 		`<defNumber name="M" label="M" format="%g" min="0" max="10" step="1">1</defNumber></defNumberVector>`
@@ -67,8 +63,6 @@ func TestWaitRevCtxStillReportsADeadlineAsATimeout(t *testing.T) {
 	}
 }
 
-// TestTheTimeoutFormsStillBehaveAsBefore checks that Wait, WaitRev and
-// WaitDevices are unchanged now that they delegate to the context forms.
 func TestTheTimeoutFormsStillBehaveAsBefore(t *testing.T) {
 	const defP = `<defNumberVector device="D" name="P" state="Ok" perm="rw">` +
 		`<defNumber name="M" label="M" format="%g" min="0" max="10" step="1">1</defNumber></defNumberVector>`
@@ -93,9 +87,6 @@ func TestTheTimeoutFormsStillBehaveAsBefore(t *testing.T) {
 	}
 }
 
-// TestWaitCtxReturnsImmediatelyOnCachedState checks that WaitCtx keeps Wait's
-// contract that already-satisfied state returns immediately, even on a
-// cancelled context.
 func TestWaitCtxReturnsImmediatelyOnCachedState(t *testing.T) {
 	const defP = `<defNumberVector device="D" name="P" state="Ok" perm="rw">` +
 		`<defNumber name="M" label="M" format="%g" min="0" max="10" step="1">1</defNumber></defNumberVector>`

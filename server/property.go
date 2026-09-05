@@ -118,8 +118,9 @@ type Member struct {
 	Light State
 }
 
-// Property is an INDI property vector, a named group of members sharing one state
-// and permission, safe for concurrent use.
+// Property is an INDI vector with shared state and permissions.
+// Its value and state methods are synchronized. Set exported metadata before
+// publishing and do not mutate the supplied Member pointers concurrently.
 type Property struct {
 	Device  string
 	Name    string

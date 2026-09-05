@@ -46,8 +46,6 @@ func readUntil(conn net.Conn, want string) bool {
 	return true
 }
 
-// TestChardataTrimmed checks that padded chardata comes out trimmed on the def
-// and set paths alike.
 func TestChardataTrimmed(t *testing.T) {
 	const defT = "<defTextVector device='D' name='P' state='Ok' perm='ro'>\n" +
 		"    <defText name='T' label='T'>\n      seed\n  </defText>\n" +
@@ -87,8 +85,6 @@ func TestChardataTrimmed(t *testing.T) {
 	}
 }
 
-// TestSexagesimalOnWire checks that Member.Num carries the parsed value of an
-// "H:M:S" number.
 func TestSexagesimalOnWire(t *testing.T) {
 	const def = `<defNumberVector device="M" name="EQUATORIAL_EOD_COORD" state="Ok" perm="rw">` +
 		`<defNumber name="RA" label="RA" format="%10.6m" min="0" max="24" step="0">0:30:00</defNumber>` +
@@ -114,8 +110,6 @@ func TestSexagesimalOnWire(t *testing.T) {
 	}
 }
 
-// TestConnectionDeath checks that a mid-session server death closes Done, sets
-// Err, and releases a pending Wait promptly.
 func TestConnectionDeath(t *testing.T) {
 	const def = `<defTextVector device="D" name="P" state="Ok" perm="ro">` +
 		`<defText name="M" label="M">v</defText></defTextVector>`
@@ -153,8 +147,6 @@ func TestConnectionDeath(t *testing.T) {
 	}
 }
 
-// TestSetAndWaitIgnoresStaleOk checks that SetNumberAndWait waits for the
-// acknowledgement following the command, not the stale Ok already in the cache.
 func TestSetAndWaitIgnoresStaleOk(t *testing.T) {
 	const def = `<defNumberVector device="M" name="COORD" state="Ok" perm="rw">` +
 		`<defNumber name="RA" label="RA" format="%f" min="0" max="24" step="0">0</defNumber></defNumberVector>`
@@ -199,8 +191,6 @@ func TestSetAndWaitIgnoresStaleOk(t *testing.T) {
 	}
 }
 
-// TestSetAndWaitAlert checks that an Alert acknowledgement becomes an error
-// carrying the property's stated reason.
 func TestSetAndWaitAlert(t *testing.T) {
 	const def = `<defNumberVector device="M" name="COORD" state="Ok" perm="rw">` +
 		`<defNumber name="RA" label="RA" format="%f" min="0" max="24" step="0">0</defNumber></defNumberVector>`
@@ -234,8 +224,6 @@ func TestSetAndWaitAlert(t *testing.T) {
 	}
 }
 
-// TestCompressedBlobSizeChecked checks that a wrong size attr and a payload that
-// is not zlib are both soft errors, with the payload still delivered.
 func TestCompressedBlobSizeChecked(t *testing.T) {
 	raw := []byte("uncompressed original data, long enough to be worth compressing compressing compressing")
 	var zbuf bytes.Buffer

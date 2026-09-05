@@ -6,8 +6,6 @@ import (
 	"testing"
 )
 
-// TestDebugGating checks that traffic logs are emitted only under WithDebug(true)
-// while lifecycle logs always are.
 func TestDebugGating(t *testing.T) {
 	for _, tc := range []struct {
 		debug       bool

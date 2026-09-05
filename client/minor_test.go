@@ -34,8 +34,6 @@ func poll(t *testing.T, timeout time.Duration, cond func() bool) bool {
 	return cond()
 }
 
-// TestDelPropertyBookkeeping checks that a device-wide delProperty forgets the
-// device and a later redefinition does not list it twice.
 func TestDelPropertyBookkeeping(t *testing.T) {
 	const defP = `<defTextVector device="D" name="P" state="Ok" perm="ro">` +
 		`<defText name="M" label="M">v</defText></defTextVector>`
@@ -57,8 +55,6 @@ func TestDelPropertyBookkeeping(t *testing.T) {
 	}
 }
 
-// TestMessageAttrs checks that the device and timestamp attrs of <message> are
-// preserved.
 func TestMessageAttrs(t *testing.T) {
 	const msg = `<message device="Cam" timestamp="2026-08-31T00:00:00" message="hello"/>`
 	addr := rawServer(t, msg)
@@ -76,8 +72,6 @@ func TestMessageAttrs(t *testing.T) {
 	}
 }
 
-// TestMessageRingCap checks that the log holds the last 1000 messages, oldest
-// first.
 func TestMessageRingCap(t *testing.T) {
 	const n = 1010
 	var b strings.Builder
@@ -99,8 +93,6 @@ func TestMessageRingCap(t *testing.T) {
 	}
 }
 
-// TestSetVectorMessage checks that the message attr of a set*Vector lands on the
-// cached property.
 func TestSetVectorMessage(t *testing.T) {
 	const def = `<defNumberVector device="M" name="COORD" state="Ok" perm="rw">` +
 		`<defNumber name="RA" label="RA" format="%f" min="0" max="24" step="0">0</defNumber></defNumberVector>`
@@ -119,8 +111,6 @@ func TestSetVectorMessage(t *testing.T) {
 	}
 }
 
-// TestZeroSizeBlobSkipsSink checks that a size='0' state-only oneBLOB never
-// reaches the sink and does not block the next real payload.
 func TestZeroSizeBlobSkipsSink(t *testing.T) {
 	const def = `<defBLOBVector device="Cam" name="CCD1" state="Ok" perm="ro">` +
 		`<defBLOB name="X" label="X"/></defBLOBVector>`
@@ -150,8 +140,6 @@ func TestZeroSizeBlobSkipsSink(t *testing.T) {
 	}
 }
 
-// TestSoftErrorsCounted checks that a dropped malformed element moves the counter
-// and reaches the trace.
 func TestSoftErrorsCounted(t *testing.T) {
 	const def = `<defTextVector device="D" name="P" state="Ok" perm="ro">` +
 		`<defText name="M" label="M">v</defText></defTextVector>`
@@ -178,8 +166,6 @@ func TestSoftErrorsCounted(t *testing.T) {
 	}
 }
 
-// TestBlobSizeMismatch checks that a decoded count disagreeing with the size attr
-// is a soft error, with the payload still delivered.
 func TestBlobSizeMismatch(t *testing.T) {
 	const def = `<defBLOBVector device="Cam" name="CCD1" state="Ok" perm="ro">` +
 		`<defBLOB name="X" label="X"/></defBLOBVector>`
@@ -218,8 +204,6 @@ func (f *failingSink) Write([]byte) (int, error)      { return 0, fmt.Errorf("di
 func (f *failingSink) Close() error                   { close(f.closed); return nil }
 func (f *failingSink) CloseWithError(err error) error { f.aborted <- err; return nil }
 
-// TestBlobSinkCloseWithError checks that a payload cut short by a sink write
-// error ends in CloseWithError rather than Close.
 func TestBlobSinkCloseWithError(t *testing.T) {
 	const def = `<defBLOBVector device="Cam" name="CCD1" state="Ok" perm="ro">` +
 		`<defBLOB name="X" label="X"/></defBLOBVector>`

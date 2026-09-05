@@ -441,9 +441,8 @@ func (c *Client) WaitRev(device, name string, sinceRev uint64, pred func(Propert
 	return c.WaitRevCtx(ctx, device, name, sinceRev, pred)
 }
 
-// WaitRevCtx is WaitRev bounded by a context; both are implemented here. A
-// cancelled context and an expired deadline are reported differently, so a
-// caller can tell its own cancel from an unresponsive device.
+// WaitRevCtx is WaitRev bounded by ctx. Cancellation wraps context.Canceled;
+// a deadline returns a timeout error. Neither cancels a device operation.
 func (c *Client) WaitRevCtx(ctx context.Context, device, name string, sinceRev uint64, pred func(Property) bool) (Property, error) {
 	for {
 		c.mu.Lock()
@@ -482,10 +481,8 @@ func (c *Client) Wait(device, name string, pred func(Property) bool, timeout tim
 	return c.WaitCtx(ctx, device, name, pred)
 }
 
-// WaitCtx is Wait bounded by a context; like Wait it may be satisfied by cached
-// pre-command state, so use WaitRevCtx to await an acknowledgement. It polls
-// rather than waking on updates, keeping Wait's contract that already-satisfied
-// state returns immediately.
+// WaitCtx is Wait bounded by ctx. Cached state can satisfy the predicate;
+// use WaitRevCtx when an update is required.
 func (c *Client) WaitCtx(ctx context.Context, device, name string, pred func(Property) bool) (Property, bool) {
 	t := time.NewTicker(5 * time.Millisecond)
 	defer t.Stop()
@@ -539,17 +536,17 @@ func (c *Client) isClosed() bool {
 	return c.closed
 }
 
-// SetNumberAndWait sends a newNumberVector and blocks until the device
-// acknowledges it with the first post-command update in state Ok or Alert.
+// SetNumberAndWait sends a vector and waits for a later update in Ok or Alert.
+// It returns an error for Alert. INDI updates have no command IDs, so unrelated
+// updates can satisfy the wait. Use WaitRev for other completion states.
 func (c *Client) SetNumberAndWait(device, name string, vals map[string]float64, timeout time.Duration) (Property, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	return c.SetNumberAndWaitCtx(ctx, device, name, vals)
 }
 
-// SetNumberAndWaitCtx is SetNumberAndWait bounded by a context. The send itself
-// is not cancellable: once the vector is on the wire the device acts on it, so
-// abandoning the wait abandons the wait and not the command.
+// SetNumberAndWaitCtx bounds the acknowledgement wait with ctx.
+// The send uses its own write timeout; cancellation does not stop device activity.
 func (c *Client) SetNumberAndWaitCtx(ctx context.Context, device, name string, vals map[string]float64) (Property, error) {
 	return c.setAndWaitCtx(ctx, device, name, func() error { return c.SetNumber(device, name, vals) })
 }

@@ -92,7 +92,6 @@ func run(t *testing.T, addr string) []conform.Result {
 	return runWith(t, addr, conform.Options{Mutate: true, Timeout: 2 * time.Second})
 }
 
-// The mount device passes the full mutate battery cleanly.
 func TestMountDeviceConforms(t *testing.T) {
 	f := &fakeMount{}
 	d := mount.New("TestScope", func() (lx200.Mount, error) { return f, nil })
@@ -140,7 +139,6 @@ func (b *brokenDev) Name() string                                           { re
 func (b *brokenDev) Properties() []*server.Property                         { return b.props }
 func (b *brokenDev) HandleNew(server.Publisher, string, []server.NewMember) {}
 
-// Both of brokenDev's defects come out as FAILs.
 func TestConformerCatchesNonConformance(t *testing.T) {
 	addr := serve(t, newBrokenDev())
 	results := run(t, addr)
@@ -175,8 +173,6 @@ func (d *propsDev) Name() string                                           { ret
 func (d *propsDev) Properties() []*server.Property                         { return d.props }
 func (d *propsDev) HandleNew(server.Publisher, string, []server.NewMember) {}
 
-// min > max fails, min == max passes as "no limit", and failures come out sorted by
-// property name regardless of map iteration order.
 func TestNumberRangeConvention(t *testing.T) {
 	num := func(name string, min, max float64) *server.Property {
 		p := server.NewProperty("Ranges", name, server.NumberType, server.RO,
@@ -213,7 +209,6 @@ func TestNumberRangeConvention(t *testing.T) {
 	}
 }
 
-// A device with no DRIVER_INFO warns and reports its interface contracts as skipped.
 func TestInterfaceContractsSkippedNote(t *testing.T) {
 	d := &propsDev{name: "NoInfo", props: []*server.Property{server.ConnectionProperty("NoInfo")}}
 	addr := serve(t, d)
@@ -261,7 +256,6 @@ func serveRaw(t *testing.T, payload string) string {
 	return ln.Addr().String()
 }
 
-// A Light must not FAIL the perm check, while a Switch missing its rule must.
 func TestLightPermAndSwitchRule(t *testing.T) {
 	addr := serveRaw(t, `
 <defSwitchVector device='Proto' name='CONNECTION' state='Idle' perm='rw' rule='OneOfMany'>
@@ -294,7 +288,6 @@ func TestLightPermAndSwitchRule(t *testing.T) {
 	}
 }
 
-// Naming an absent device must FAIL, not run zero checks and pass.
 func TestRequestedDeviceNotFound(t *testing.T) {
 	d := &propsDev{name: "Here", props: []*server.Property{server.ConnectionProperty("Here")}}
 	addr := serve(t, d)
@@ -311,7 +304,6 @@ func TestRequestedDeviceNotFound(t *testing.T) {
 	}
 }
 
-// Without a device filter the run settles the def burst and checks every device.
 func TestDeviceCountReported(t *testing.T) {
 	a := &propsDev{name: "A", props: []*server.Property{server.ConnectionProperty("A")}}
 	b := &propsDev{name: "B", props: []*server.Property{server.ConnectionProperty("B")}}
@@ -393,8 +385,6 @@ func (d *lateDev) HandleNew(pub server.Publisher, name string, members []server.
 }
 func (d *lateDev) handled() int { d.mu.Lock(); defer d.mu.Unlock(); return d.news }
 
-// With -mutate, contracts are evaluated on the post-connect snapshot and the device is
-// disconnected again afterwards.
 func TestPostConnectContractsWithMutate(t *testing.T) {
 	d := newLateDev()
 	addr := serve(t, d)
@@ -425,7 +415,6 @@ func TestPostConnectContractsWithMutate(t *testing.T) {
 	}
 }
 
-// Without -mutate the contracts are skipped rather than FAILed, and nothing is mutated.
 func TestPostConnectContractsSkippedWithoutMutate(t *testing.T) {
 	d := newLateDev()
 	addr := serve(t, d)
@@ -469,9 +458,6 @@ func (f *fakeCam) Frame() (int, int, []byte, error) {
 }
 func (f *fakeCam) AbortExposure() error { f.mu.Lock(); f.ready = false; f.mu.Unlock(); return nil }
 
-// The ccd device passes the camera contract, including a real exposure delivering a
-// FITS BLOB. It advertises GUIDER without the timed-guide properties, so those checks
-// are expected to fail.
 func TestCCDDeviceConforms(t *testing.T) {
 	d := ccd.New("Cam", func() (ccd.Camera, error) { return &fakeCam{}, nil })
 	addr := serve(t, d)
@@ -528,7 +514,6 @@ func (d *connectableDev) HandleNew(pub server.Publisher, name string, members []
 	pub.Update(d.conn)
 }
 
-// A camera missing CCD_INFO must FAIL.
 func TestBrokenCCDFails(t *testing.T) {
 	exp := server.NewProperty("BadCam", "CCD_EXPOSURE", server.NumberType, server.RW,
 		&server.Member{Name: "CCD_EXPOSURE_VALUE", Min: 0, Max: 3600})
@@ -575,8 +560,6 @@ func multiProps(n string) []*server.Property {
 	return []*server.Property{focus, slot, dome, geo, utc, weather, angle}
 }
 
-// One device implementing six interface contracts passes cleanly and decodes all six
-// interface names.
 func TestCompositeInterfaceContracts(t *testing.T) {
 	d := newConnectable("Multi", multiIface, multiProps("Multi")...)
 	addr := serve(t, d)
@@ -609,7 +592,6 @@ func TestCompositeInterfaceContracts(t *testing.T) {
 	}
 }
 
-// The same interface mask with none of the required properties fails every contract.
 func TestCompositeBrokenContracts(t *testing.T) {
 	d := newConnectable("MultiBad", multiIface)
 	addr := serve(t, d)
@@ -626,7 +608,6 @@ func TestCompositeBrokenContracts(t *testing.T) {
 	}
 }
 
-// A zero interface mask decodes as GENERAL.
 func TestInterfaceListGeneral(t *testing.T) {
 	d := newConnectable("Plain", 0)
 	addr := serve(t, d)
@@ -655,8 +636,6 @@ func hasResult(results []conform.Result, check string, st conform.Status) bool {
 	return false
 }
 
-// An expired context makes Run return promptly with a failure instead of grinding
-// through every per-wait timeout.
 func TestRunHonorsContext(t *testing.T) {
 	f := &fakeMount{}
 	d := mount.New("TestScope", func() (lx200.Mount, error) { return f, nil })

@@ -5,8 +5,6 @@ import (
 	"testing"
 )
 
-// TestParseNumber checks the decimal and sexagesimal spellings ParseNumber
-// accepts and rejects.
 func TestParseNumber(t *testing.T) {
 	almost := func(a, b float64) bool { return math.Abs(a-b) < 1e-9 }
 	good := map[string]float64{

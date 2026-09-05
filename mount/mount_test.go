@@ -123,7 +123,6 @@ func newDev() (*mount.Device, *fakeMount) {
 	return mount.New("TestScope", func() (lx200.Mount, error) { return f, nil }), f
 }
 
-// CONNECT settles the CONNECTION property Ok.
 func TestConnect(t *testing.T) {
 	d, _ := newDev()
 	pub := &capPub{}
@@ -137,7 +136,6 @@ func TestConnect(t *testing.T) {
 	}
 }
 
-// With ON_COORD_SET=SLEW, a new coordinate slews rather than syncs.
 func TestSlew(t *testing.T) {
 	d, f := newDev()
 	pub := &capPub{}
@@ -151,7 +149,6 @@ func TestSlew(t *testing.T) {
 	}
 }
 
-// With ON_COORD_SET=SYNC, a new coordinate syncs rather than slews.
 func TestSync(t *testing.T) {
 	d, f := newDev()
 	pub := &capPub{}
@@ -164,7 +161,6 @@ func TestSync(t *testing.T) {
 	}
 }
 
-// A timed-guide vector reaches the mount as one pulse of the right direction and length.
 func TestPulseGuide(t *testing.T) {
 	d, f := newDev()
 	pub := &capPub{}
@@ -175,7 +171,6 @@ func TestPulseGuide(t *testing.T) {
 	}
 }
 
-// A goto with a malformed number must alert the property and touch nothing on the mount.
 func TestMalformedCoordinateRejected(t *testing.T) {
 	d, f := newDev()
 	pub := &capPub{}
@@ -202,7 +197,6 @@ func TestMalformedCoordinateRejected(t *testing.T) {
 	}
 }
 
-// Coordinates in the INDI sexagesimal forms "H:M:S" and "D M S" are accepted.
 func TestSexagesimalCoordinates(t *testing.T) {
 	d, f := newDev()
 	pub := &capPub{}
@@ -215,7 +209,6 @@ func TestSexagesimalCoordinates(t *testing.T) {
 	}
 }
 
-// A malformed duration must not pulse.
 func TestMalformedGuidePulseRejected(t *testing.T) {
 	d, f := newDev()
 	pub := &capPub{}
@@ -242,7 +235,6 @@ func (o *fakeOptics) OpticsMM() (float64, float64, float64, float64) {
 	return o.ap, o.fl, o.gap, o.gfl
 }
 
-// WithOptics exposes TELESCOPE_INFO carrying the holder's values.
 func TestTelescopeInfoReportsOptics(t *testing.T) {
 	opt := &fakeOptics{ap: 200, fl: 1600, gap: 60, gfl: 240}
 	d := mount.New("TestScope", func() (lx200.Mount, error) { return &fakeMount{}, nil }, mount.WithOptics(opt))
@@ -267,7 +259,6 @@ func TestTelescopeInfoReportsOptics(t *testing.T) {
 	}
 }
 
-// WithGuideRate is reported on both GUIDE_RATE axes.
 func TestGuideRateReported(t *testing.T) {
 	d := mount.New("TestScope", func() (lx200.Mount, error) { return &fakeMount{}, nil },
 		mount.WithGuideRate(0.75))
@@ -288,7 +279,6 @@ func TestGuideRateReported(t *testing.T) {
 	}
 }
 
-// Without WithGuideRate the reported rate defaults to 0.5x sidereal.
 func TestGuideRateDefault(t *testing.T) {
 	d := mount.New("TestScope", func() (lx200.Mount, error) { return &fakeMount{}, nil })
 	for _, p := range d.Properties() {
@@ -306,7 +296,6 @@ type guidingMount struct {
 
 func (g *guidingMount) GuideRateSidereal() (float64, error) { return g.rate, nil }
 
-// A mount that can report its rate overrides the configured default on connect.
 func TestGuideRateFromMount(t *testing.T) {
 	gm := &guidingMount{fakeMount: &fakeMount{}, rate: 0.25}
 	d := mount.New("TestScope", func() (lx200.Mount, error) { return gm, nil })
@@ -349,8 +338,6 @@ func (m *dualAxisMount) lastSet() (bool, bool) { // value, ok
 	return m.set[len(m.set)-1], true
 }
 
-// DUAL_AXIS_TRACKING appears only for a capable mount, seeded from its state, drives the
-// mount on set, and is removed on disconnect.
 func TestDualAxisTracking(t *testing.T) {
 	plain, _ := newDev()
 	plain.HandleNew(&capPub{}, "CONNECTION", []server.NewMember{nm("CONNECT", "On")})
@@ -394,7 +381,6 @@ func TestDualAxisTracking(t *testing.T) {
 	}
 }
 
-// Without WithOptics there is no TELESCOPE_INFO.
 func TestNoOpticsNoTelescopeInfo(t *testing.T) {
 	d := mount.New("TestScope", func() (lx200.Mount, error) { return &fakeMount{}, nil })
 	for _, p := range d.Properties() {
@@ -404,7 +390,6 @@ func TestNoOpticsNoTelescopeInfo(t *testing.T) {
 	}
 }
 
-// TELESCOPE_ABORT_MOTION halts the mount.
 func TestAbort(t *testing.T) {
 	d, f := newDev()
 	pub := &capPub{}
@@ -414,7 +399,6 @@ func TestAbort(t *testing.T) {
 	}
 }
 
-// TestEndToEndPulseGuide drives a pulse guide all the way over a TCP INDI session.
 func TestEndToEndPulseGuide(t *testing.T) {
 	f := &fakeMount{}
 	d := mount.New("TestScope", func() (lx200.Mount, error) { return f, nil })

@@ -50,7 +50,6 @@ func (c *capPub) count() int { c.mu.Lock(); defer c.mu.Unlock(); return c.blobs 
 
 func nm(name, val string) server.NewMember { return server.NewMember{Name: name, Value: val} }
 
-// Connecting fills CCD_INFO from the camera's geometry.
 func TestCCDConnectReportsPixelSize(t *testing.T) {
 	d := New("Cam", func() (Camera, error) { return &fakeCam{}, nil })
 	d.HandleNew(&capPub{}, "CONNECTION", []server.NewMember{nm("CONNECT", "On")})
@@ -66,7 +65,6 @@ func TestCCDConnectReportsPixelSize(t *testing.T) {
 	}
 }
 
-// A commanded exposure delivers one 2880-aligned FITS BLOB.
 func TestCCDExposureDeliversFITSBlob(t *testing.T) {
 	d := New("Cam", func() (Camera, error) { return &fakeCam{}, nil })
 	pub := &capPub{}
@@ -89,7 +87,6 @@ func TestCCDExposureDeliversFITSBlob(t *testing.T) {
 	}
 }
 
-// A malformed duration must not start an exposure.
 func TestMalformedExposureRejected(t *testing.T) {
 	cam := &fakeCam{}
 	d := New("Cam", func() (Camera, error) { return cam, nil })
@@ -109,7 +106,6 @@ func TestMalformedExposureRejected(t *testing.T) {
 	}
 }
 
-// encodeFITS emits BITPIX 16 or 8 to match the input depth.
 func TestEncodeFITS(t *testing.T) {
 	out16 := encodeFITS(16, 8, 16, make([]byte, 16*8*2))
 	if len(out16)%2880 != 0 || !strings.Contains(string(out16[:2880]), "NAXIS1") {

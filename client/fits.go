@@ -8,10 +8,6 @@ import (
 	"strings"
 )
 
-// FITS decoding for CCD BLOBs. An INDI camera driver sends its frame as a FITS
-// payload on CCD1 (indiccd.cpp), so a client cannot get an image out of a
-// standard driver without this.
-
 const (
 	// fitsBlock is FITS's allocation unit: headers and data are padded to a
 	// multiple of it, which is what makes the data offset computable.
@@ -40,16 +36,10 @@ type Frame struct {
 	Header map[string]string
 }
 
-// DecodeFITS decodes a CCD BLOB into a Frame.
-//
-// Samples are converted to unsigned 16-bit ADU in one pass; 32-bit and float
-// payloads saturate. That is lossless for every bit depth an INDI camera
-// reports through CCD_BITSPERPIXEL, which is 8, 16 or 32 with the sensor's own
-// range inside 16 bits. A caller needing the full range of a float frame has
-// Header and BitPix and can decode the payload itself.
-//
-// Only the primary HDU is read: INDI writes a single one, and a payload with
-// extensions did not come from a camera.
+// DecodeFITS reads the primary image into row-major unsigned 16-bit samples.
+// It applies BSCALE/BZERO, rounds and clamps values to 0–65535, and preserves
+// Bayer metadata. For a 3-D image, only the first plane is decoded.
+// Keep the original payload if the full numeric range or other HDUs are needed.
 func DecodeFITS(blob []byte) (*Frame, error) {
 	hdr, off, err := scanFITSHeader(blob)
 	if err != nil {
@@ -113,12 +103,8 @@ func DecodeFITS(blob []byte) (*Frame, error) {
 	return fr, nil
 }
 
-// fitsMosaic records the Bayer phase from the header, when the frame has one.
-//
-// Three steps, each a silent colour swap if dropped: BAYERPAT names the
-// pattern, XBAYROFF/YBAYROFF shift it because a subframe starting on an odd
-// column inverts the mosaic, and a row flip inverts it again — but only on an
-// even height, since on an odd one the bottom row has the top row's parity.
+// fitsMosaic adjusts the Bayer phase for subframe offsets and row order.
+// A vertical flip changes parity only when the image height is even.
 func fitsMosaic(fr *Frame, hdr map[string]string, flipped bool) {
 	x, y, ok := bayerPhase(strings.ToUpper(strings.TrimSpace(hdr["BAYERPAT"])))
 	if !ok {
@@ -147,13 +133,8 @@ func bayerPhase(name string) (x, y int, ok bool) {
 	return 0, 0, false
 }
 
-// convertFITSRow reads one FITS row: big-endian in, unsigned-16 ADU out.
-//
-// The first branch is the point of the function. BITPIX=16 with BSCALE=1 and
-// BZERO=32768 is what every INDI camera sends at 16 bits, and the two steps —
-// swap the bytes, then add 32768 to recover the unsigned value — are together
-// one big-endian read and one flip of the top bit, since adding 32768 modulo
-// 2^16 IS inverting bit 15. No branch, no float, no second pass.
+// convertFITSRow converts big-endian FITS samples to unsigned 16-bit ADU.
+// For BITPIX=16, BSCALE=1, BZERO=32768, flipping bit 15 applies the offset.
 func convertFITSRow(dst []uint16, src []byte, bitpix int, bzero, bscale float64) {
 	if bitpix == 16 && bscale == 1 && bzero == fitsUnsignedBZERO {
 		for i := range dst {
@@ -210,12 +191,8 @@ func clampADU(v float64) uint16 {
 	return uint16(v + 0.5)
 }
 
-// scanFITSHeader collects the primary header's cards and returns the data offset.
-//
-// The SIMPLE check is where a payload that is not FITS at all is caught, and
-// that has one common cause worth naming: CCD_TRANSFER_FORMAT set to
-// FORMAT_NATIVE or FORMAT_XISF, in which case the BLOB is the sensor's own file
-// format and every field below is garbage.
+// scanFITSHeader validates SIMPLE, collects primary-header cards, and returns
+// the data offset.
 func scanFITSHeader(raw []byte) (map[string]string, int, error) {
 	if len(raw) < fitsBlock || strings.TrimSpace(string(raw[:6])) != "SIMPLE" {
 		return nil, 0, fmt.Errorf("indi: BLOB of %d bytes is not FITS — is CCD_TRANSFER_FORMAT set to FORMAT_FITS?",
@@ -242,12 +219,8 @@ func scanFITSHeader(raw []byte) (map[string]string, int, error) {
 	return nil, 0, fmt.Errorf("indi: FITS header has no END card in %d bytes", len(raw))
 }
 
-// fitsCardValue extracts a card's value, stripping quotes and the comment.
-//
-// The quoted form is parsed rather than cut at the first "/" because a
-// separator inside a string is data: 'RGGB' / Bayer color pattern is the common
-// case, and an OBJECT naming a target with a slash is the one that would break
-// a cut. Doubled quotes are FITS's escape for a literal one.
+// fitsCardValue removes quoting and trailing comments, preserving slashes
+// inside strings and decoding doubled quotes.
 func fitsCardValue(v string) string {
 	v = strings.TrimSpace(v)
 	if strings.HasPrefix(v, "'") {

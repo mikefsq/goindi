@@ -1,50 +1,129 @@
 # goindi
 
-INDI server and client libraries for Go.
+INDI client and server libraries for Go, with telescope and camera adapters and
+a command-line conformance checker. Requires Go 1.25 or later.
 
-## Client
+## Use the client
+
+Add the module to your application:
+
+```sh
+go get github.com/mikefsq/goindi
+```
+
+Connect to an INDI server and list its devices:
 
 ```go
-c, err := client.Dial(ctx, "localhost:7624")
-defer c.Close()
-c.GetProperties("", "")
-c.WaitDevices(1, 3*time.Second)
+package main
 
-_, err = c.SetNumberAndWait("10Micron", "EQUATORIAL_EOD_COORD",
-	map[string]float64{"RA": 5.5, "DEC": -5.4}, 10*time.Second)
+import (
+    "context"
+    "fmt"
+    "log"
+    "time"
+
+    "github.com/mikefsq/goindi/client"
+)
+
+func main() {
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+    c, err := client.Dial(ctx, "localhost:7624")
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer c.Close()
+
+    if err := c.GetProperties("", ""); err != nil {
+        log.Print(err)
+        return
+    }
+    if !c.WaitDevices(1, 3*time.Second) {
+        log.Print("No devices received before timeout or disconnection")
+        return
+    }
+    for _, name := range c.Devices() {
+        fmt.Println(name)
+    }
+}
 ```
 
-## Server
+Enumeration arrives asynchronously. `WaitDevices` waits for a minimum count;
+more devices and properties can arrive afterwards. `Properties` and `Property`
+return snapshots. The Dial context bounds connection establishment; call Close
+to end the session. The client does not reconnect automatically; watch Done
+and inspect Err before redialing.
 
-```go
-s := server.New(":7624", server.WithLogger(log.Printf))
-s.AddDevice(dev) // anything implementing server.Device
-go s.Serve(ctx)
+Use `SetNumber`, `SetSwitch`, or `SetText` to send changes. The `AndWait` variants
+wait for a newer property update in `Ok` or `Alert`, returning an error for Alert.
+Some operations complete in `Idle`; use `WaitRev` with an appropriate predicate
+for those. INDI has no command IDs, so an unrelated update can satisfy a wait.
+Cancelling a wait does not cancel the device operation.
+
+## Receive images
+
+Install a sink with `BlobSinkFor` or `BufferBlobsFor`, then enable delivery with
+`EnableBLOB(device, property, client.BlobAlso)`. BLOB delivery is off by default.
+Device-specific sinks allow multiple cameras to share one connection.
+
+Sink callbacks run on the client's read loop and must not block. Payloads are
+base64-decoded, but zlib-compressed BLOBs remain compressed; check
+`BlobInfo.Compressed` before decoding the image.
+
+`DecodeFITS` converts a complete primary image to row-major `uint16` samples.
+`FITSWriter` decodes incrementally without retaining a full encoded image.
+Both round and clamp samples to 0–65535 and read only the first plane of a
+3-D image. Keep the original payload when you need its full precision or other
+FITS extensions.
+
+## Check an INDI server
+
+Build the checker from a checkout:
+
+```sh
+go build -o indiconform ./cmd/indiconform
+./indiconform -addr localhost:7624
 ```
 
-## Conformance testing
+The default run reads definitions and checks selected standard property
+contracts. Limit the run to one device with `-device "Device Name"`.
 
-`conform` validates any INDI server.
+State-changing checks are optional:
 
+```sh
+./indiconform -addr localhost:7624 -device "CCD Simulator" -mutate -timeout 60s
 ```
-indiconform -addr localhost:7624                            # read-only, every device
-indiconform -addr localhost:7624 -device 10Micron -mutate
+
+`-mutate` can connect devices, issue guide pulses, and take exposures. It attempts
+to disconnect devices it connected. Use a simulator or a prepared hardware setup.
+`-timeout` bounds the overall run (default 30 seconds).
+
+Exit codes are 0 for no failed checks, 1 for failed checks, and 2 for a connection
+error. Warnings do not cause a failing exit code. These checks cover selected
+contracts, not every device feature.
+
+## Write a device
+
+See [DRIVERS.md](DRIVERS.md) for property definitions, command handling,
+publication, lifecycle, and tests. The server hosts Go implementations of
+`server.Device`; it does not launch external INDI driver binaries.
+
+## Packages
+
+| Package | Purpose |
+|---------|---------|
+| `client` | Enumeration, property updates, command waits, BLOBs, and FITS decoding |
+| `server` | XML protocol, property model, and TCP device server |
+| `mount` | Telescope and guider adapter over `lx200.Mount` |
+| `ccd` | Camera adapter over a frame source |
+| `conform` | Protocol and property-contract checks |
+
+## Tests
+
+```sh
+go test ./...
+go test -race ./...
 ```
 
-## Go device drivers
-
-`mount` and `ccd` are INDI drivers written in Go that `server` hosts directly,
-without a driver binary. Tests run `conform` against them to prove the server serves a conforming device.
-
-## Layout
-
-```
-server/   protocol and hub: property model, XML codec, sexagesimal numbers,
-          the Device/Starter/Publisher interfaces, standard property
-          constructors, DRIVER_INTERFACE bits
-client/   INDI client: enumerate, set-and-wait, BLOB sinks, liveness
-conform/  black-box conformance validator
-cmd/indiconform/  CLI wrapper around conform
-mount/    Go driver: telescope and guider over any lx200.Mount
-ccd/      Go driver: camera over any frame source
-```
+Tests use local servers and fake hardware. Optional tests against libindi's
+simulators are described in [DRIVERS.md](DRIVERS.md#tests).

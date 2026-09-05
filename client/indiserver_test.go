@@ -89,8 +89,6 @@ func connectDevice(t *testing.T, c *client.Client, device string) {
 	}
 }
 
-// TestAgainstIndiserver drives the client against a real indiserver: enumerate,
-// connect, set a number, and stream a FITS frame through the BLOB sink.
 func TestAgainstIndiserver(t *testing.T) {
 	root := indiBuild(t)
 	addr := startIndiserver(t, filepath.Join(root, "drivers", "ccd", "indi_simulator_ccd"))

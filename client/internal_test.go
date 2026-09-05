@@ -9,7 +9,6 @@ import (
 	"time"
 )
 
-// TestDecodeQuad checks the base64 quantum decoder, padding included.
 func TestDecodeQuad(t *testing.T) {
 	cases := []struct {
 		in   string
@@ -44,8 +43,6 @@ func TestDecodeQuad(t *testing.T) {
 	}
 }
 
-// TestB64WriterRejectsDataAfterPadding checks that a padded quantum ends the
-// payload.
 func TestB64WriterRejectsDataAfterPadding(t *testing.T) {
 	var buf bytes.Buffer
 	w := &b64Writer{w: &buf}
@@ -54,7 +51,6 @@ func TestB64WriterRejectsDataAfterPadding(t *testing.T) {
 	}
 }
 
-// TestB64WriterCountsDecodedBytes checks the decoded byte count across tokens.
 func TestB64WriterCountsDecodedBytes(t *testing.T) {
 	var buf bytes.Buffer
 	w := &b64Writer{w: &buf}
@@ -69,8 +65,6 @@ func TestB64WriterCountsDecodedBytes(t *testing.T) {
 	}
 }
 
-// TestSendWriteDeadline checks that a peer which stops reading turns send into a
-// timeout error rather than a hang.
 func TestSendWriteDeadline(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

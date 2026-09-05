@@ -30,18 +30,9 @@ func (b *namedBlobDev) Name() string                                           {
 func (b *namedBlobDev) Properties() []*server.Property                         { return b.props }
 func (b *namedBlobDev) HandleNew(server.Publisher, string, []server.NewMember) {}
 
-// enableBLOBs turns BLOB delivery on and WAITS for the server to have applied it.
-//
-// enableBLOB is a one-way message: the client writes it and returns, and the
-// server applies it on that connection's read loop. A SendBLOB racing that is
-// dropped for good, because the policy is consulted when the payload is sent and
-// there is no retry — which made these tests fail about one run in three, with
-// every camera receiving nothing.
-//
-// The round trip is what orders it. A connection's inbound messages are handled
-// in order on one loop, so a getProperties answered AFTER the enableBLOB proves
-// the enableBLOB was handled first. Waiting on the property's revision is what
-// "answered" means here.
+// enableBLOBs waits for a getProperties round trip after enabling delivery.
+// The server processes both messages in order, so the reply confirms the policy
+// is active before a test sends its BLOB.
 func enableBLOBs(t *testing.T, c *client.Client, devs ...string) {
 	t.Helper()
 	for _, d := range devs {
@@ -62,10 +53,6 @@ func enableBLOBs(t *testing.T, c *client.Client, devs ...string) {
 	}
 }
 
-// TestBlobSinkForKeepsTwoDevicesApart checks that two cameras on one connection
-// each receive their own payload, which BlobSink alone cannot do: registering
-// twice replaces the first sink, so one camera's images go to the other's
-// consumer and it never sees an image of its own.
 func TestBlobSinkForKeepsTwoDevicesApart(t *testing.T) {
 	a, b := newNamedBlobDev("CamA"), newNamedBlobDev("CamB")
 	s := startServer(t, a, b)
@@ -116,8 +103,6 @@ func TestBlobSinkForKeepsTwoDevicesApart(t *testing.T) {
 	}
 }
 
-// TestBlobSinkForFallsBackToTheConnectionSink checks that a device with no sink
-// of its own still reaches BlobSink, so the per-device form is additive.
 func TestBlobSinkForFallsBackToTheConnectionSink(t *testing.T) {
 	a, b := newNamedBlobDev("CamA"), newNamedBlobDev("CamB")
 	s := startServer(t, a, b)
@@ -156,7 +141,6 @@ func TestBlobSinkForFallsBackToTheConnectionSink(t *testing.T) {
 		perDevice, shared, len(want))
 }
 
-// Removing a device's sink returns it to the connection-wide one.
 func TestBlobSinkForNilRemoves(t *testing.T) {
 	a := newNamedBlobDev("CamA")
 	s := startServer(t, a)

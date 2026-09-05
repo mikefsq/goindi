@@ -27,9 +27,6 @@ func streamDecode(t *testing.T, blob []byte, chunk int) (*client.Frame, error) {
 	return w.Frame()
 }
 
-// The streaming and buffering decoders must agree exactly, at every chunk size:
-// a row that spans two writes is the case the streaming one can get wrong, and
-// the result would be a frame that is the right size with one band displaced.
 func TestFITSWriterAgreesWithDecodeFITS(t *testing.T) {
 	pix := make([]uint16, 16*9)
 	for i := range pix {
@@ -74,8 +71,6 @@ func u16bytes(p []uint16) []byte {
 	return b
 }
 
-// A payload that stops early must be an error. Missing rows are zeroes, which
-// read as black sky in a frame that is otherwise the right shape.
 func TestFITSWriterRejectsAShortPayload(t *testing.T) {
 	// Cut inside the DATA, not the block padding: mono16 pads the payload to a
 	// 2880 multiple, so lopping bytes off the end of the blob removes padding and
@@ -95,8 +90,6 @@ func TestFITSWriterRejectsAShortPayload(t *testing.T) {
 	}
 }
 
-// A payload that is not FITS is decided on the first block rather than at Close,
-// so a driver in FORMAT_NATIVE is not buffered to completion first.
 func TestFITSWriterRejectsNonFITSEarly(t *testing.T) {
 	w := client.NewFITSWriter()
 	junk := make([]byte, 4096)
@@ -105,7 +98,6 @@ func TestFITSWriterRejectsNonFITSEarly(t *testing.T) {
 	}
 }
 
-// An empty payload fails at Close rather than producing a zero-sized frame.
 func TestFITSWriterRejectsAnEmptyPayload(t *testing.T) {
 	w := client.NewFITSWriter()
 	if err := w.Close(); err == nil {
@@ -113,7 +105,6 @@ func TestFITSWriterRejectsAnEmptyPayload(t *testing.T) {
 	}
 }
 
-// Frame before Close is a caller error, not an empty frame.
 func TestFITSWriterFrameBeforeCloseFails(t *testing.T) {
 	w := client.NewFITSWriter()
 	if _, err := w.Write(mono16(2, 2, []uint16{1, 2, 3, 4})); err != nil {
@@ -124,11 +115,7 @@ func TestFITSWriterFrameBeforeCloseFails(t *testing.T) {
 	}
 }
 
-// Both benchmarks measure the SAME journey — payload chunks in, Frame out — so
-// the buffering one has to include accumulating the payload. Handing DecodeFITS a
-// blob that is already allocated measures the conversion and hides the buffer,
-// which is the whole thing streaming removes: the first version of this benchmark
-// did that and reported the two paths as identical.
+// Both benchmarks include payload accumulation and decoding into a Frame.
 func benchChunks(blob []byte) [][]byte {
 	var out [][]byte
 	for off := 0; off < len(blob); off += 64 << 10 {

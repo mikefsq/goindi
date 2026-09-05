@@ -6,18 +6,10 @@ import (
 	"io"
 )
 
-// FITSWriter decodes a FITS payload as it arrives, so the encoded bytes never
-// have to be held whole.
-//
-// DecodeFITS needs the complete payload in memory and then allocates the samples
-// beside it, which for a 62 MP 16-bit frame is two ~124 MB buffers live at once.
-// This holds one: the header (a few KB) and the output samples. Rows are
-// converted as they land, so the cost is the same single pass either way.
-//
-// Write runs wherever the BLOB sink runs, which for a Client is the read loop
-// shared by every device on the connection. The work per row is a byte swap and
-// a bit flip — the same work the buffering path does later, moved earlier — but
-// a caller that must not occupy the read loop at all should keep buffering.
+// FITSWriter decodes a primary FITS image incrementally into a Frame.
+// It retains the header, output samples, and a partial row. Conversion and
+// precision follow DecodeFITS. As a BLOB sink, Write runs on the client read loop.
+// Compressed BLOBs must be decompressed before writing.
 type FITSWriter struct {
 	hdrBuf []byte // header bytes, until END is found
 	hdr    map[string]string
@@ -27,9 +19,7 @@ type FITSWriter struct {
 	bottomUp                  bool
 
 	pix []uint16
-	// row is the partial row carried across a Write boundary; payloads arrive in
-	// arbitrary chunks and a row that spans two of them cannot be converted from
-	// either alone.
+	// row retains bytes from a row split across Write calls.
 	row  []byte
 	held int // bytes valid in row
 	y    int // the next SOURCE row to convert
@@ -157,8 +147,7 @@ func (f *FITSWriter) size(hdr map[string]string) error {
 	return nil
 }
 
-// Close ends the payload. It reports an incomplete frame rather than handing
-// back one whose missing rows read as black sky.
+// Close ends the payload and reports incomplete frames.
 func (f *FITSWriter) Close() error {
 	if f.err != nil {
 		return f.err

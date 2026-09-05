@@ -122,8 +122,6 @@ func (s *Server) connCount() int {
 	return len(s.conns)
 }
 
-// TestStalledClientDroppedOthersLive checks that a client that stops reading is
-// dropped once its queue fills, while the other clients keep working.
 func TestStalledClientDroppedOthersLive(t *testing.T) {
 	oldBytes, oldMsgs := outQueueBytes, outQueueMsgs
 	outQueueBytes, outQueueMsgs = 256<<10, 16
@@ -181,8 +179,6 @@ func TestStalledClientDroppedOthersLive(t *testing.T) {
 	}
 }
 
-// TestConnGoroutinesReturnToBaseline checks that repeated connect/disconnect
-// cycles leak none of the per-connection goroutines.
 func TestConnGoroutinesReturnToBaseline(t *testing.T) {
 	s := startHub(t, newGateDev("A"))
 	time.Sleep(50 * time.Millisecond)
@@ -207,8 +203,6 @@ func TestConnGoroutinesReturnToBaseline(t *testing.T) {
 	}
 }
 
-// TestEnableBLOBDeviceScoping checks that enabling BLOBs for one device does not
-// enable them for another.
 func TestEnableBLOBDeviceScoping(t *testing.T) {
 	s := startHub(t, newGateDev("A"), newGateDev("B"))
 	c := dialHub(t, s)
@@ -226,8 +220,6 @@ func TestEnableBLOBDeviceScoping(t *testing.T) {
 	}
 }
 
-// TestEnableBLOBNeverIsScoped checks that Never for one device leaves another
-// device's BLOBs flowing.
 func TestEnableBLOBNeverIsScoped(t *testing.T) {
 	s := startHub(t, newGateDev("A"), newGateDev("B"))
 	c := dialHub(t, s)
@@ -245,8 +237,6 @@ func TestEnableBLOBNeverIsScoped(t *testing.T) {
 	}
 }
 
-// TestEnableBLOBOnlySuppressesChatter checks that Only delivers BLOB traffic and
-// nothing else.
 func TestEnableBLOBOnlySuppressesChatter(t *testing.T) {
 	d := newGateDev("A")
 	s := startHub(t, d)
@@ -269,8 +259,6 @@ func TestEnableBLOBOnlySuppressesChatter(t *testing.T) {
 	}
 }
 
-// TestEnableBLOBPropertyNarrowingWins checks that a property-level policy
-// overrides the device-level one in both directions.
 func TestEnableBLOBPropertyNarrowingWins(t *testing.T) {
 	s := startHub(t, newGateDev("A"))
 
@@ -291,8 +279,6 @@ func TestEnableBLOBPropertyNarrowingWins(t *testing.T) {
 	}
 }
 
-// TestEnableBLOBUnrecognizedModeIgnored checks that a garbage mode leaves the
-// policy at its Never default.
 func TestEnableBLOBUnrecognizedModeIgnored(t *testing.T) {
 	s := startHub(t, newGateDev("A"))
 	c := dialHub(t, s)
@@ -304,7 +290,6 @@ func TestEnableBLOBUnrecognizedModeIgnored(t *testing.T) {
 	}
 }
 
-// TestLightVectorMarshal checks the def and set forms of a Light vector.
 func TestLightVectorMarshal(t *testing.T) {
 	p := NewProperty("Weather", "WEATHER_STATUS", LightType, RO,
 		&Member{Name: "TEMP", Label: "Temperature", Light: Ok},
@@ -361,8 +346,6 @@ func TestLightVectorMarshal(t *testing.T) {
 	}
 }
 
-// TestLightVectorReachesWire checks that a Light property is enumerated to a
-// client.
 func TestLightVectorReachesWire(t *testing.T) {
 	d := newGateDev("A")
 	light := NewProperty("A", "WEATHER_STATUS", LightType, RO, &Member{Name: "SAFE", Light: Ok})
@@ -377,8 +360,6 @@ func TestLightVectorReachesWire(t *testing.T) {
 	}
 }
 
-// TestDispatchNewGate checks which inbound new*Vectors reach HandleNew and which
-// are rejected.
 func TestDispatchNewGate(t *testing.T) {
 	d := newGateDev("Gate")
 	s := startHub(t, d)
@@ -438,8 +419,6 @@ func (l *fakeListener) Accept() (net.Conn, error) {
 func (l *fakeListener) Close() error   { return nil }
 func (l *fakeListener) Addr() net.Addr { return l.addr }
 
-// TestAcceptLoopSurvivesTransientError checks that a transient Accept error does
-// not end the loop but a closed listener does.
 func TestAcceptLoopSurvivesTransientError(t *testing.T) {
 	s := New("127.0.0.1:0")
 	if err := s.AddDevice(newGateDev("A")); err != nil {
@@ -479,8 +458,6 @@ func TestAcceptLoopSurvivesTransientError(t *testing.T) {
 	}
 }
 
-// TestOversizedInboundDropsClientOnly checks that an oversized element kills only
-// that connection, leaving the hub serving.
 func TestOversizedInboundDropsClientOnly(t *testing.T) {
 	s := startHub(t, newGateDev("A"))
 	bad := dialHub(t, s)
@@ -510,7 +487,6 @@ func TestOversizedInboundDropsClientOnly(t *testing.T) {
 	}
 }
 
-// TestParseNumber checks the decimal and sexagesimal spellings ParseNumber accepts.
 func TestParseNumber(t *testing.T) {
 	cases := []struct {
 		in   string
@@ -542,8 +518,6 @@ func TestParseNumber(t *testing.T) {
 	}
 }
 
-// TestBlobSizeSemantics checks that the BLOB size attr is the uncompressed byte
-// count.
 func TestBlobSizeSemantics(t *testing.T) {
 	orig := bytes.Repeat([]byte("pixel data "), 1000)
 	var zbuf bytes.Buffer
@@ -570,8 +544,6 @@ func TestBlobSizeSemantics(t *testing.T) {
 	}
 }
 
-// TestSendBLOBCompressedSizeOnWire checks that the SendBLOB path puts the
-// uncompressed count on the wire for a pre-compressed payload.
 func TestSendBLOBCompressedSizeOnWire(t *testing.T) {
 	s := startHub(t, newGateDev("A"))
 	c := dialHub(t, s)

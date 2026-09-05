@@ -76,7 +76,6 @@ func payload() []byte {
 	return b
 }
 
-// TestBlobRoundTrip checks that an enabled BLOB reaches the sink byte-exact.
 func TestBlobRoundTrip(t *testing.T) {
 	s := startServer(t, newBlobDev())
 	c := dialClient(t, s)
@@ -129,7 +128,6 @@ func TestBlobRoundTrip(t *testing.T) {
 	}
 }
 
-// TestBlobNotEnabled checks that no payload arrives without EnableBLOB.
 func TestBlobNotEnabled(t *testing.T) {
 	s := startServer(t, newBlobDev())
 	c := dialClient(t, s)
@@ -145,8 +143,6 @@ func TestBlobNotEnabled(t *testing.T) {
 	}
 }
 
-// TestBlobSinkStreams checks that decoded bytes reach the sink in batches, one
-// Write per chardata token rather than one per base64 quantum.
 func TestBlobSinkStreams(t *testing.T) {
 	s := startServer(t, newBlobDev())
 	c := dialClient(t, s)
@@ -188,8 +184,6 @@ type countingWriter struct {
 func (w *countingWriter) Write(p []byte) (int, error) { w.n += len(p); w.writes++; return len(p), nil }
 func (w *countingWriter) Close() error                { w.closed = true; close(w.done); return nil }
 
-// TestBlobCompressedFormat checks that a ".z" payload reaches the sink
-// compressed, with Size reporting the uncompressed count.
 func TestBlobCompressedFormat(t *testing.T) {
 	want := payload()
 	var zbuf bytes.Buffer
@@ -241,8 +235,6 @@ func TestBlobCompressedFormat(t *testing.T) {
 	}
 }
 
-// TestLightMemberUpdates checks that a setLightVector moves the member, not just
-// the vector state.
 func TestLightMemberUpdates(t *testing.T) {
 	const def = `<defLightVector device="Safety" name="SAFETY_STATUS" state="Ok">` +
 		`<defLight name="SAFE" label="Safe">Ok</defLight></defLightVector>`

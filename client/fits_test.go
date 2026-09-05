@@ -66,8 +66,6 @@ func TestDecodeFITSReadsUnsigned16(t *testing.T) {
 	}
 }
 
-// BZERO is the one that halves the sky and wraps the stars if it is dropped:
-// without it a mid-scale sample reads as a near-zero one.
 func TestDecodeFITSAppliesBZERO(t *testing.T) {
 	raw := make([]byte, 2)
 	binary.BigEndian.PutUint16(raw, 0x8000) // signed -32768, physical value 0
@@ -85,8 +83,6 @@ func TestDecodeFITSAppliesBZERO(t *testing.T) {
 	}
 }
 
-// Samples are big-endian on the wire; reading them little-endian gives a plausible
-// frame with every value wrong.
 func TestDecodeFITSReadsBigEndian(t *testing.T) {
 	fr, err := client.DecodeFITS(mono16(1, 1, []uint16{0x1234}))
 	if err != nil {
@@ -97,7 +93,6 @@ func TestDecodeFITSReadsBigEndian(t *testing.T) {
 	}
 }
 
-// ROWORDER absent means top-down, matching what indiccd.cpp stamps.
 func TestDecodeFITSRowOrder(t *testing.T) {
 	pix := []uint16{10, 11, 20, 21} // row 0 then row 1
 	top, err := client.DecodeFITS(mono16(2, 2, pix))
@@ -151,8 +146,6 @@ func TestDecodeFITSBayerPhase(t *testing.T) {
 	}
 }
 
-// No BAYERPAT means mono. Guessing a pattern swaps the colours of every frame
-// from a mono camera.
 func TestDecodeFITSWithoutBayerPatIsMono(t *testing.T) {
 	fr, err := client.DecodeFITS(mono16(2, 2, []uint16{1, 2, 3, 4}))
 	if err != nil {
@@ -163,8 +156,6 @@ func TestDecodeFITSWithoutBayerPatIsMono(t *testing.T) {
 	}
 }
 
-// A 3-axis FITS is already colour-separated, so it carries no phase even if the
-// header names a pattern.
 func TestDecodeFITSThreeAxisIsNotMosaiced(t *testing.T) {
 	data := make([]byte, 2*4*3)
 	cards := []string{
@@ -181,8 +172,6 @@ func TestDecodeFITSThreeAxisIsNotMosaiced(t *testing.T) {
 	}
 }
 
-// 8-bit samples are not scaled up to fill 16 bits: CCD_BITSPERPIXEL reports 255
-// as the full scale of an 8-bit readout.
 func TestDecodeFITS8BitIsNotScaledUp(t *testing.T) {
 	cards := []string{
 		card("SIMPLE", "T"), card("BITPIX", "8"), card("NAXIS", "2"),
@@ -218,8 +207,6 @@ func TestDecodeFITSFloatSaturates(t *testing.T) {
 	}
 }
 
-// A quoted value may contain the comment separator, so the comment cannot be cut
-// at the first "/".
 func TestDecodeFITSCardValueKeepsSlashesInsideQuotes(t *testing.T) {
 	fr, err := client.DecodeFITS(mono16(1, 1, []uint16{1},
 		card("OBJECT", "'M42 / Orion'          / target")))
@@ -231,16 +218,12 @@ func TestDecodeFITSCardValueKeepsSlashesInsideQuotes(t *testing.T) {
 	}
 }
 
-// A payload that is not FITS is the common symptom of CCD_TRANSFER_FORMAT set to
-// something else, so it must be an error rather than a garbage frame.
 func TestDecodeFITSRejectsNonFITS(t *testing.T) {
 	if _, err := client.DecodeFITS(make([]byte, 4096)); err == nil {
 		t.Error("DecodeFITS accepted a non-FITS payload, want an error")
 	}
 }
 
-// The dimensions come off the wire and w*h*per overflows, so a short payload must
-// be caught by a check that does not multiply.
 func TestDecodeFITSRejectsShortData(t *testing.T) {
 	cards := []string{
 		card("SIMPLE", "T"), card("BITPIX", "16"), card("NAXIS", "2"),
@@ -262,8 +245,6 @@ func TestDecodeFITSRejectsUnsupportedBitpix(t *testing.T) {
 	}
 }
 
-// TRACKRATE_SIDEREAL is derived from STELLAR_DAY in indimacros.h; a hardcoded
-// 15.041067 carries a permanent offset into every rate comparison.
 func TestTrackRatesMatchLibindi(t *testing.T) {
 	if got := client.TrackRateSidereal; math.Abs(got-15.041067179) > 1e-6 {
 		t.Errorf("TrackRateSidereal = %v, want ~15.041067", got)

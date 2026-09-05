@@ -7,8 +7,6 @@ import (
 	"testing"
 )
 
-// TestBlobSetXMLEscapesAttrs checks that blobSetXML escapes XML-special
-// characters in attribute values.
 func TestBlobSetXMLEscapesAttrs(t *testing.T) {
 	const device = `R&D "Scope"`
 	const format = `.fits<&>'`

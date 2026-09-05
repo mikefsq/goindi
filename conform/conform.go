@@ -1,5 +1,5 @@
-// Package conform is a black-box validator that drives any INDI server and reports
-// whether it conforms to the protocol and the standard property contracts.
+// Package conform checks INDI protocol behavior and selected standard property
+// contracts through a client connection.
 package conform
 
 import (
@@ -107,7 +107,8 @@ var (
 	validRule  = map[string]bool{"OneOfMany": true, "AtMostOne": true, "AnyOfMany": true}
 )
 
-// Run executes the conformance battery against c and returns the results.
+// Run checks discovered devices and returns the results.
+// With Mutate enabled, it may connect devices, pulse guiding, and take exposures.
 func Run(ctx context.Context, c *client.Client, opts Options) []Result {
 	if opts.Timeout == 0 {
 		opts.Timeout = 3 * time.Second
@@ -324,26 +325,8 @@ func connectCheck(ctx context.Context, c *client.Client, dev string, opts Option
 	return true
 }
 
-// disconnectCheck restores the device to its pre-run state after conform connected it.
-//
-// # IPS_IDLE is a terminal state for CONNECTION
-//
-// This cannot use SetSwitchAndWait, and the reason is a property of the reference implementation
-// rather than a preference. libindi acknowledges a SUCCESSFUL disconnect with IPS_IDLE:
-//
-//	// defaultdevice.cpp, the DISCONNECT branch
-//	if (Disconnect())
-//	{
-//	    setConnected(false, IPS_IDLE);
-//	    updateProperties();
-//	}
-//
-// SetSwitchAndWait waits for Ok or Alert, which is right for every other vector and wrong for this
-// one — so the wait ran to the full timeout on a device that had disconnected instantly, and this
-// check warned about all eight libindi simulators. A validator that reports the reference
-// implementation as non-conforming is worse than no validator: it teaches its users to ignore it.
-//
-// Busy is the only state meaning "still working", so anything else is an answer.
+// disconnectCheck disconnects a device connected by this run.
+// Accept Idle as completion: libindi uses it for a successful disconnect.
 func disconnectCheck(ctx context.Context, c *client.Client, dev string, opts Options, r *report) {
 	check := "DISCONNECT restores initial state"
 	var since uint64
@@ -536,18 +519,8 @@ func inflatedLen(data []byte) (int64, error) {
 	return io.Copy(io.Discard, zr)
 }
 
-// pulseCheck issues a 10ms guide pulse and reports whether the device acknowledges it.
-// pulseCheck commands a short guide pulse. A timed guide is an INITIATOR, so the check is that the
-// driver ACCEPTED it — not that the vector reached Ok, which it never does.
-//
-// libindi's GuiderInterface starts a pulse by putting the vector in IPS_BUSY and finishes it with
-// IPS_IDLE (`indiguiderinterface.cpp:127`: `GuideNSNP.setState(IPS_IDLE)` in GuideComplete). Ok is
-// not in that sequence at all, so SetNumberAndWait — which waits for Ok or Alert — ran to the full
-// timeout on a pulse that had been accepted and completed normally, and warned about the reference
-// implementation.
-//
-// A 10 ms pulse can also be OVER before the wait starts, so Busy and Idle are both passes: the
-// first is "running", the second is "ran". Only Alert is a refusal.
+// pulseCheck sends a 10 ms guide pulse and checks acceptance.
+// Busy or Idle can acknowledge it; libindi finishes pulses in Idle. Alert rejects it.
 func pulseCheck(ctx context.Context, c *client.Client, dev, prop, member string, opts Options, r *report) {
 	check := "pulse guide accepted: " + prop
 	before := len(c.Messages())

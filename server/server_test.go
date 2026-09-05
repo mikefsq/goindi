@@ -40,8 +40,6 @@ func drainFor(c net.Conn, d time.Duration) string {
 	}
 }
 
-// TestSendBLOBGating checks that a BLOB reaches only the clients that asked for
-// it with enableBLOB.
 func TestSendBLOBGating(t *testing.T) {
 	s := startServer(t, newBlobDev())
 
@@ -176,8 +174,6 @@ func readElem(t *testing.T, dec *xml.Decoder) elem {
 	}
 }
 
-// TestGetPropertiesEnumeratesDevice checks that getProperties returns a def for
-// every property of a device.
 func TestGetPropertiesEnumeratesDevice(t *testing.T) {
 	s := startServer(t, newFakeDev())
 	c, dec := dial(t, s)
@@ -196,8 +192,6 @@ func TestGetPropertiesEnumeratesDevice(t *testing.T) {
 	}
 }
 
-// TestNewVectorDispatchesAndEchoes checks that a new*Vector reaches the device
-// and the resulting set*Vector reaches the client.
 func TestNewVectorDispatchesAndEchoes(t *testing.T) {
 	f := newFakeDev()
 	s := startServer(t, f)
@@ -219,8 +213,6 @@ func TestNewVectorDispatchesAndEchoes(t *testing.T) {
 	}
 }
 
-// TestCharsetProcInst checks that an ISO-8859-1 XML declaration does not kill the
-// connection.
 func TestCharsetProcInst(t *testing.T) {
 	s := startServer(t, newFakeDev())
 	c, dec := dial(t, s)
@@ -230,8 +222,6 @@ func TestCharsetProcInst(t *testing.T) {
 	}
 }
 
-// TestMalformedXMLDropsClientOnly checks that garbage bytes drop only the
-// offending client, leaving the hub serving.
 func TestMalformedXMLDropsClientOnly(t *testing.T) {
 	s := startServer(t, newFakeDev())
 
@@ -270,8 +260,6 @@ func (d *starterDev) Properties() []*server.Property                         { r
 func (d *starterDev) HandleNew(server.Publisher, string, []server.NewMember) {}
 func (d *starterDev) Start(ctx context.Context, pub server.Publisher)        { close(d.started) }
 
-// TestAddDeviceAfterServeStartsStarter checks that a Starter registered while the
-// hub is already serving is started and enumerated.
 func TestAddDeviceAfterServeStartsStarter(t *testing.T) {
 	s := startServer(t)
 	late := newStarterDev("Late")
@@ -290,7 +278,6 @@ func TestAddDeviceAfterServeStartsStarter(t *testing.T) {
 	}
 }
 
-// TestSwitchRules checks that SetSwitch enforces each SwitchRule.
 func TestSwitchRules(t *testing.T) {
 	one := server.ConnectionProperty("Dev")
 	one.SetSwitch("DISCONNECT", false)
@@ -327,7 +314,6 @@ func TestSwitchRules(t *testing.T) {
 	}
 }
 
-// TestDuplicateDeviceRejected checks that AddDevice refuses a name already in use.
 func TestDuplicateDeviceRejected(t *testing.T) {
 	s := server.New("127.0.0.1:0")
 	if err := s.AddDevice(newFakeDev()); err != nil {

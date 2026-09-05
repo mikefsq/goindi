@@ -18,8 +18,8 @@ const (
 	BlobOnly  BlobMode = "Only"  // BLOBs and nothing else, for a dedicated connection
 )
 
-// EnableBLOB asks the server to deliver BLOBs, which it silently sends to nobody
-// until asked; an empty name applies the mode to every property of the device.
+// EnableBLOB sets the delivery policy; new connections receive no BLOB payloads.
+// An empty name applies to all properties of the device. The send has no acknowledgement.
 func (c *Client) EnableBLOB(device, name string, mode BlobMode) error {
 	return c.send(wEnableBLOB{Device: device, Name: name, Mode: string(mode)})
 }
@@ -41,28 +41,19 @@ type BlobInfo struct {
 	Compressed bool
 }
 
-// BlobSink routes each BLOB payload's decoded bytes to a writer chosen per
-// payload, closing it when the payload ends (through CloseWithError if it ended
-// incomplete); returning nil discards the payload.
-//
-// One sink serves the whole connection. Consumers that own a single device
-// should use BlobSinkFor instead: registering here twice replaces the first
-// sink, which on a server with two cameras silently sends both streams to
-// whichever consumer registered last.
+// BlobSink sets the connection-wide BLOB sink. Writers receive base64-decoded
+// bytes; compressed payloads remain compressed. A nil writer discards the payload.
+// Sink callbacks run on the read loop and must not block. Writers supporting
+// CloseWithError receive transfer errors; otherwise io.Closer is used.
+// Use BlobSinkFor to route devices separately.
 func (c *Client) BlobSink(fn func(BlobInfo) io.Writer) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.blobSink = fn
 }
 
-// BlobSinkFor routes one device's BLOBs, so several consumers can share a
-// connection without displacing each other. A device with no sink of its own
-// falls back to BlobSink's.
-//
-// An indiserver multiplexes every device onto one connection, so two cameras
-// arrive on the same stream; a client that registers a sink per camera through
-// BlobSink keeps only the last, and the other camera exposes forever without
-// ever producing an image. Passing nil removes the device's sink.
+// BlobSinkFor sets a device-specific sink, overriding the connection-wide sink.
+// Passing nil removes the override. See BlobSink for writer and callback semantics.
 func (c *Client) BlobSinkFor(device string, fn func(BlobInfo) io.Writer) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

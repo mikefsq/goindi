@@ -1,7 +1,6 @@
 package ccd
 
-// Optional Camera capabilities. A camera implementing one gets the matching
-// property defined on connect; one that skips it never advertises the property.
+// Optional Camera capabilities define additional properties on connection.
 
 // GainController exposes the sensor gain as CCD_CONTROLS.Gain, in the camera's
 // native units.
@@ -10,7 +9,8 @@ type GainController interface {
 	SetGain(int) error
 }
 
-// OffsetController exposes the sensor offset (black level) as CCD_CONTROLS.Offset.
+// OffsetController adds CCD_CONTROLS.Offset when the camera also implements
+// GainController.
 type OffsetController interface {
 	Offset() (value, min, max int)
 	SetOffset(int) error

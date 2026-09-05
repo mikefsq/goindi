@@ -31,8 +31,7 @@ type NewMember struct {
 	Value string
 }
 
-// Float parses Value as an INDI number, plain decimal or sexagesimal, reporting
-// ok=false on malformed input so a bad RA is refused rather than slewing to 0.
+// Float parses a decimal or sexagesimal number, returning false on invalid input.
 func (m NewMember) Float() (f float64, ok bool) {
 	return ParseNumber(m.Value)
 }

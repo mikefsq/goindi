@@ -23,7 +23,6 @@ func (c *capCam) SetSubframe(x, y, w, h int) error {
 	return nil
 }
 
-// A capable camera gets CCD_CONTROLS and CCD_FRAME on connect, and sets route to it.
 func TestCCDGainAndSubframeCaps(t *testing.T) {
 	cam := &capCam{gain: 100, off: 10, x: 0, y: 0, w: 16, h: 8}
 	d := New("Cam", func() (Camera, error) { return cam, nil })
@@ -60,7 +59,6 @@ func TestCCDGainAndSubframeCaps(t *testing.T) {
 	}
 }
 
-// A camera without the optional capabilities must not advertise CCD_CONTROLS/CCD_FRAME.
 func TestCCDNoCapsWhenUnsupported(t *testing.T) {
 	d := New("Cam", func() (Camera, error) { return &fakeCam{}, nil })
 	d.HandleNew(&capPub{}, "CONNECTION", []server.NewMember{nm("CONNECT", "On")})
