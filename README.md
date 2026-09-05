@@ -60,22 +60,6 @@ Some operations complete in `Idle`; use `WaitRev` with an appropriate predicate
 for those. INDI has no command IDs, so an unrelated update can satisfy a wait.
 Cancelling a wait does not cancel the device operation.
 
-## Receive images
-
-Install a sink with `BlobSinkFor` or `BufferBlobsFor`, then enable delivery with
-`EnableBLOB(device, property, client.BlobAlso)`. BLOB delivery is off by default.
-Device-specific sinks allow multiple cameras to share one connection.
-
-Sink callbacks run on the client's read loop and must not block. Payloads are
-base64-decoded, but zlib-compressed BLOBs remain compressed; check
-`BlobInfo.Compressed` before decoding the image.
-
-`DecodeFITS` converts a complete primary image to row-major `uint16` samples.
-`FITSWriter` decodes incrementally without retaining a full encoded image.
-Both round and clamp samples to 0–65535 and read only the first plane of a
-3-D image. Keep the original payload when you need its full precision or other
-FITS extensions.
-
 ## Check an INDI server
 
 Build the checker from a checkout:
